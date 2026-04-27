@@ -3,7 +3,6 @@ import pandas as pd
 import joblib
 import shap
 import matplotlib.pyplot as plt
-from agent import CreditRiskAgent
 
 # ============================================================
 # STYLE (UI POLISH)
