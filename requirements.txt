@@ -5,3 +5,4 @@ scikit-learn
 lightgbm
 joblib
 matplotlib
+shap==0.44.1
