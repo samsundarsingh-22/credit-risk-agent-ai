@@ -227,22 +227,104 @@ if st.button("🚀 Evaluate Credit Risk"):
     # PDF DOWNLOAD (CORRECT)
     # ============================================================
 
-    def create_pdf(result):
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
+    def create_pdf(result, reasons, recs, user):
 
-        pdf.cell(200, 10, "Credit Risk Report", ln=True)
-        pdf.cell(200, 10, f"PD: {result['pd']:.2%}", ln=True)
-        pdf.cell(200, 10, f"Score: {result['credit_score']}", ln=True)
-        pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
+    pdf = FPDF()
+    pdf.add_page()
 
-        pdf_bytes = pdf.output(dest='S').encode('latin-1')
-        return BytesIO(pdf_bytes)
+    # =========================
+    # HEADER
+    # =========================
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(200, 10, "AI CREDIT RISK REPORT", ln=True, align="C")
+
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(200, 8, f"Customer: {user}", ln=True)
+    pdf.cell(200, 8, f"Report Generated: {pd.Timestamp.now()}", ln=True)
+    pdf.ln(5)
+
+    # =========================
+    # CUSTOMER PROFILE
+    # =========================
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "1. CUSTOMER PROFILE", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    pdf.cell(200, 8, f"Credit Limit: ₹{LIMIT_BAL}", ln=True)
+    pdf.cell(200, 8, f"Age: {AGE}", ln=True)
+    pdf.cell(200, 8, f"Recent Payment Status: {PAY_0}", ln=True)
+    pdf.ln(5)
+
+    # =========================
+    # RISK SUMMARY
+    # =========================
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "2. AI RISK SUMMARY", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    pdf.cell(200, 8, f"Probability of Default (PD): {result['pd']:.2%}", ln=True)
+    pdf.cell(200, 8, f"Credit Score: {result['credit_score']}", ln=True)
+    pdf.cell(200, 8, f"Decision: {result['decision']}", ln=True)
+    pdf.ln(5)
+
+    # =========================
+    # KEY RISK FACTORS
+    # =========================
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "3. KEY RISK FACTORS", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+
+    if reasons:
+        for r in reasons:
+            pdf.multi_cell(0, 8, f"- {r}")
+    else:
+        pdf.cell(200, 8, "No major risks detected", ln=True)
+
+    pdf.ln(5)
+
+    # =========================
+    # RECOMMENDATIONS
+    # =========================
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "4. RECOMMENDATIONS", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    for r in recs:
+        pdf.multi_cell(0, 8, f"- {r}")
+
+    pdf.ln(5)
+
+    # =========================
+    # MODEL INTERPRETATION
+    # =========================
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(200, 10, "5. MODEL INTERPRETATION", ln=True)
+
+    pdf.set_font("Arial", "", 11)
+    pdf.multi_cell(0, 8,
+        "This decision is generated using a calibrated machine learning model "
+        "with SHAP explainability. Feature contributions determine how each "
+        "financial factor impacts the probability of default."
+    )
+
+    pdf.ln(5)
+
+    # =========================
+    # DISCLAIMER
+    # =========================
+    pdf.set_font("Arial", "I", 9)
+    pdf.multi_cell(0, 6,
+        "Disclaimer: This is an AI-generated credit assessment for research purposes. "
+        "It does not replace official credit bureau reports."
+    )
+
+    pdf_bytes = pdf.output(dest='S').encode('latin-1')
+    return BytesIO(pdf_bytes)
 
     st.download_button(
-        "📄 Download Report",
-        create_pdf(result),
-        file_name="credit_report.pdf",
-        mime="application/pdf"
+    "📄 Download Professional Report",
+    create_pdf(result, reasons, recs, st.session_state.current_user),
+    file_name="credit_report.pdf",
+    mime="application/pdf"
     )
