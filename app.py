@@ -205,25 +205,29 @@ if st.button("🚀 Evaluate Credit Risk"):
     """)
 
     # ============================================================
-    # PDF DOWNLOAD (FIXED)
-    # ============================================================
+# PDF DOWNLOAD (FINAL FIX)
+# ============================================================
 
-    def create_pdf():
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
+def create_pdf(result):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
 
-        pdf.cell(200, 10, "Credit Risk Report", ln=True)
-        pdf.cell(200, 10, f"PD: {result['pd']:.2%}", ln=True)
-        pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
+    pdf.cell(200, 10, "AI Credit Risk Report", ln=True)
+    pdf.ln(5)
 
-        buffer = BytesIO()
-        pdf.output(buffer)
-        buffer.seek(0)
-        return buffer
+    pdf.cell(200, 10, f"Probability of Default: {result['pd']:.2%}", ln=True)
+    pdf.cell(200, 10, f"Credit Score: {result['credit_score']}", ln=True)
+    pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
 
-    st.download_button(
-        "📄 Download Report",
-        create_pdf(),
-        "report.pdf"
-    )
+    pdf_bytes = pdf.output(dest='S').encode('latin-1')
+    return BytesIO(pdf_bytes)
+
+pdf_file = create_pdf(result)
+
+st.download_button(
+    label="📄 Download Credit Report",
+    data=pdf_file,
+    file_name="credit_report.pdf",
+    mime="application/pdf"
+)
