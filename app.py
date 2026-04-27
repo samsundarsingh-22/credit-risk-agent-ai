@@ -8,29 +8,57 @@ from io import BytesIO
 from fpdf import FPDF
 
 # ============================================================
-# LOGIN SYSTEM
+# SESSION INIT (LOGIN / SIGNUP)
 # ============================================================
+
+if "users" not in st.session_state:
+    st.session_state.users = {"admin": "1234"}
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-def login():
-    st.title("🔐 Credit Risk System Login")
-    user = st.text_input("Username")
-    pwd = st.text_input("Password", type="password")
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
 
-    if st.button("Login"):
-        if user == "admin" and pwd == "1234":
-            st.session_state.logged_in = True
-        else:
-            st.error("Invalid credentials")
+# ============================================================
+# AUTH PAGE
+# ============================================================
 
+def auth_page():
+    st.title("🔐 AI Credit Risk System")
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    with tab1:
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+
+        if st.button("Login"):
+            if user in st.session_state.users and st.session_state.users[user] == pwd:
+                st.session_state.logged_in = True
+                st.session_state.current_user = user
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    with tab2:
+        new_user = st.text_input("Create Username")
+        new_pwd = st.text_input("Create Password", type="password")
+
+        if st.button("Sign Up"):
+            if new_user in st.session_state.users:
+                st.warning("User already exists")
+            else:
+                st.session_state.users[new_user] = new_pwd
+                st.success("Signup successful")
+
+# Stop if not logged in
 if not st.session_state.logged_in:
-    login()
+    auth_page()
     st.stop()
 
 # ============================================================
-# LOAD FILES
+# LOAD MODEL
 # ============================================================
 
 model = joblib.load("credit_model.pkl")
@@ -40,6 +68,18 @@ feature_columns = joblib.load("feature_columns.pkl")
 
 agent = CreditRiskAgent(model, calibrator, scaler, feature_columns)
 explainer = shap.TreeExplainer(model)
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("🏦 Dashboard")
+st.sidebar.write(f"User: {st.session_state.current_user}")
+st.sidebar.success("System Active")
+
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.rerun()
 
 # ============================================================
 # FEATURE LABELS
@@ -55,15 +95,11 @@ feature_map = {
 }
 
 # ============================================================
-# UI HEADER
+# UI
 # ============================================================
 
 st.title("🏦 AI Credit Risk Decision System")
-st.caption("Explainable AI • Decision Support • Risk Simulation")
-
-# ============================================================
-# INPUTS
-# ============================================================
+st.caption("Explainable AI • Decision Support • Simulation")
 
 repayment_map = {
     "Paid on time": 0,
@@ -75,18 +111,19 @@ repayment_map = {
 LIMIT_BAL = st.number_input("Credit Limit (₹)", value=200000)
 AGE = st.number_input("Age", value=35)
 
-PAY_0 = repayment_map[st.selectbox("Recent Repayment", repayment_map.keys())]
-PAY_2 = repayment_map[st.selectbox("Previous Repayment", repayment_map.keys())]
+PAY_0 = repayment_map[st.selectbox("Recent Repayment", list(repayment_map.keys()))]
+PAY_2 = repayment_map[st.selectbox("Previous Repayment", list(repayment_map.keys()))]
 
 BILL_AMT1 = st.number_input("Latest Bill Amount", value=50000)
 PAY_AMT1 = st.number_input("Latest Payment", value=5000)
 
 # ============================================================
-# RUN MODEL
+# MAIN BUTTON
 # ============================================================
 
 if st.button("🚀 Evaluate Credit Risk"):
 
+    # Prepare input
     input_data = {
         "LIMIT_BAL": LIMIT_BAL,
         "AGE": AGE,
@@ -102,6 +139,7 @@ if st.button("🚀 Evaluate Credit Risk"):
 
     input_df = pd.DataFrame([input_data])[feature_columns]
 
+    # Run agent
     output = agent.run(input_df)
     result = output["result"]
     reasons = output["reasons"]
@@ -115,11 +153,11 @@ if st.button("🚀 Evaluate Credit Risk"):
 
     c1, c2, c3 = st.columns(3)
     c1.metric("PD", f"{result['pd']:.2%}")
-    c2.metric("Score", result['credit_score'])
-    c3.metric("Decision", result['decision'])
+    c2.metric("Score", result["credit_score"])
+    c3.metric("Decision", result["decision"])
 
     # ============================================================
-    # SHAP (FIXED)
+    # SHAP
     # ============================================================
 
     st.markdown("## 🔍 Feature Impact")
@@ -150,9 +188,26 @@ if st.button("🚀 Evaluate Credit Risk"):
     for f, v in top:
         name = feature_map.get(f, f)
         if v > 0:
-            st.write(f"🔴 High {name} increases financial stress → higher risk")
+            st.write(f"🔴 High {name} increases risk")
         else:
-            st.write(f"🟢 Lower {name} indicates better repayment capacity")
+            st.write(f"🟢 Lower {name} reduces risk")
+
+    # ============================================================
+    # SIMULATOR
+    # ============================================================
+
+    st.markdown("## 🔄 What-if Simulator")
+
+    new_payment = st.slider("Change Payment", 0, int(BILL_AMT1), PAY_AMT1)
+
+    temp_df = input_df.copy()
+    temp_df["PAY_AMT1"] = new_payment
+
+    sim = agent.run(temp_df)
+
+    col1, col2 = st.columns(2)
+    col1.metric("Current PD", f"{result['pd']:.2%}")
+    col2.metric("New PD", f"{sim['result']['pd']:.2%}")
 
     # ============================================================
     # DECISION LOGIC
@@ -169,65 +224,25 @@ if st.button("🚀 Evaluate Credit Risk"):
     """)
 
     # ============================================================
-    # SIMULATOR
+    # PDF DOWNLOAD (CORRECT)
     # ============================================================
 
-    st.markdown("## 🔄 What-if Simulator")
+    def create_pdf(result):
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
 
-    new_payment = st.slider("Change Payment", 0, int(BILL_AMT1), PAY_AMT1)
+        pdf.cell(200, 10, "Credit Risk Report", ln=True)
+        pdf.cell(200, 10, f"PD: {result['pd']:.2%}", ln=True)
+        pdf.cell(200, 10, f"Score: {result['credit_score']}", ln=True)
+        pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
 
-    temp = input_df.copy()
-    temp["PAY_AMT1"] = new_payment
+        pdf_bytes = pdf.output(dest='S').encode('latin-1')
+        return BytesIO(pdf_bytes)
 
-    sim = agent.run(temp)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("### Current")
-        st.metric("PD", f"{result['pd']:.2%}")
-
-    with col2:
-        st.write("### Improved")
-        st.metric("PD", f"{sim['result']['pd']:.2%}")
-
-    # ============================================================
-    # MODEL RELIABILITY
-    # ============================================================
-
-    st.markdown("## 📊 Model Reliability")
-
-    st.write("""
-    - Cross-validation used
-    - ROC-AUC evaluated
-    - Bootstrap confidence intervals applied
-    - Probability calibration ensures realistic PD
-    """)
-
-    # ============================================================
-# PDF DOWNLOAD (FINAL FIX)
-# ============================================================
-
-def create_pdf(result):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-
-    pdf.cell(200, 10, "AI Credit Risk Report", ln=True)
-    pdf.ln(5)
-
-    pdf.cell(200, 10, f"Probability of Default: {result['pd']:.2%}", ln=True)
-    pdf.cell(200, 10, f"Credit Score: {result['credit_score']}", ln=True)
-    pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
-
-    pdf_bytes = pdf.output(dest='S').encode('latin-1')
-    return BytesIO(pdf_bytes)
-
-pdf_file = create_pdf(result)
-
-st.download_button(
-    label="📄 Download Credit Report",
-    data=pdf_file,
-    file_name="credit_report.pdf",
-    mime="application/pdf"
-)
+    st.download_button(
+        "📄 Download Report",
+        create_pdf(result),
+        file_name="credit_report.pdf",
+        mime="application/pdf"
+    )
