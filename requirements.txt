@@ -3,6 +3,7 @@ pandas
 numpy==1.26.4
 scikit-learn
 lightgbm
-joblib
-matplotlib
 shap==0.44.1
+matplotlib
+joblib
+fpdf
