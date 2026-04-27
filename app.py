@@ -4,26 +4,30 @@ import joblib
 import shap
 import matplotlib.pyplot as plt
 from agent import CreditRiskAgent
+from io import BytesIO
 from fpdf import FPDF
 
 # ============================================================
-# STYLE
+# LOGIN SYSTEM
 # ============================================================
 
-st.markdown("""
-<style>
-.main {background-color: #f5f7fb;}
-h1, h2, h3 {color: #1f3b73;}
-.stButton>button {
-    background-color: #1f77b4;
-    color: white;
-    border-radius: 10px;
-    height: 3em;
-    width: 100%;
-    font-weight: bold;
-}
-</style>
-""", unsafe_allow_html=True)
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+def login():
+    st.title("🔐 Credit Risk System Login")
+    user = st.text_input("Username")
+    pwd = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        if user == "admin" and pwd == "1234":
+            st.session_state.logged_in = True
+        else:
+            st.error("Invalid credentials")
+
+if not st.session_state.logged_in:
+    login()
+    st.stop()
 
 # ============================================================
 # LOAD FILES
@@ -41,12 +45,12 @@ explainer = shap.TreeExplainer(model)
 # FEATURE LABELS
 # ============================================================
 
-feature_name_map = {
+feature_map = {
     "LIMIT_BAL": "Credit Limit",
     "AGE": "Age",
     "PAY_0": "Recent Payment Delay",
     "PAY_2": "Previous Payment Delay",
-    "BILL_AMT1": "Latest Bill Amount",
+    "BILL_AMT1": "Latest Bill",
     "PAY_AMT1": "Latest Payment"
 }
 
@@ -54,8 +58,8 @@ feature_name_map = {
 # UI HEADER
 # ============================================================
 
-st.title("🏦 Agentic AI Credit Risk System")
-st.caption("Explainable AI • Decision Engine • Risk Intelligence")
+st.title("🏦 AI Credit Risk Decision System")
+st.caption("Explainable AI • Decision Support • Risk Simulation")
 
 # ============================================================
 # INPUTS
@@ -71,8 +75,8 @@ repayment_map = {
 LIMIT_BAL = st.number_input("Credit Limit (₹)", value=200000)
 AGE = st.number_input("Age", value=35)
 
-PAY_0 = repayment_map[st.selectbox("Recent Repayment", list(repayment_map.keys()))]
-PAY_2 = repayment_map[st.selectbox("Previous Month", list(repayment_map.keys()))]
+PAY_0 = repayment_map[st.selectbox("Recent Repayment", repayment_map.keys())]
+PAY_2 = repayment_map[st.selectbox("Previous Repayment", repayment_map.keys())]
 
 BILL_AMT1 = st.number_input("Latest Bill Amount", value=50000)
 PAY_AMT1 = st.number_input("Latest Payment", value=5000)
@@ -81,7 +85,7 @@ PAY_AMT1 = st.number_input("Latest Payment", value=5000)
 # RUN MODEL
 # ============================================================
 
-if st.button("Run AI Credit Assessment"):
+if st.button("🚀 Evaluate Credit Risk"):
 
     input_data = {
         "LIMIT_BAL": LIMIT_BAL,
@@ -98,12 +102,10 @@ if st.button("Run AI Credit Assessment"):
 
     input_df = pd.DataFrame([input_data])[feature_columns]
 
-    agent_output = agent.run(input_df)
-
-    result = agent_output["result"]
-    recommendations = agent_output["recommendations"]
-    reasons = agent_output["reasons"]
-    summary = agent_output["summary"]
+    output = agent.run(input_df)
+    result = output["result"]
+    reasons = output["reasons"]
+    recs = output["recommendations"]
 
     # ============================================================
     # DASHBOARD
@@ -111,127 +113,117 @@ if st.button("Run AI Credit Assessment"):
 
     st.markdown("## 🧠 Decision Dashboard")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-
-    c1.metric("Score", result["credit_score"])
-    c2.metric("PD", f"{result['pd']:.2%}")
-    c3.metric("Loss", f"₹{result['expected_loss']:,.0f}")
-    c4.metric("Risk", result["risk_bucket"])
-    c5.metric("Decision", result["decision"])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("PD", f"{result['pd']:.2%}")
+    c2.metric("Score", result['credit_score'])
+    c3.metric("Decision", result['decision'])
 
     # ============================================================
-    # SHAP
+    # SHAP (FIXED)
     # ============================================================
 
     st.markdown("## 🔍 Feature Impact")
 
-    input_scaled = scaler.transform(input_df)
+    scaled = scaler.transform(input_df)
+    df_scaled = pd.DataFrame(scaled, columns=feature_columns)
+    df_scaled.rename(columns=feature_map, inplace=True)
 
-    input_scaled_df = pd.DataFrame(input_scaled, columns=feature_columns)
-    input_scaled_df.rename(columns=feature_name_map, inplace=True)
-
-    shap_values = explainer.shap_values(input_scaled_df)
-
+    shap_values = explainer.shap_values(df_scaled)
     if isinstance(shap_values, list):
         shap_values = shap_values[1]
 
     fig, ax = plt.subplots()
-
-    shap.summary_plot(
-        shap_values,
-        input_scaled_df,
-        plot_type="bar",
-        show=False
-    )
-
-    ax.set_xlabel("Impact on Risk")
+    shap.summary_plot(shap_values, df_scaled, plot_type="bar", show=False)
+    ax.set_xlabel("Impact on Default Risk")
     ax.set_ylabel("Customer Features")
-
     st.pyplot(fig)
 
     # ============================================================
-    # KEY DRIVERS
+    # BUSINESS INTERPRETATION
     # ============================================================
 
-    st.markdown("### Key Drivers")
+    st.markdown("## 🧠 Business Interpretation")
 
-    top_features = sorted(
-        zip(feature_columns, shap_values[0]),
-        key=lambda x: abs(x[1]),
-        reverse=True
-    )[:3]
+    top = sorted(zip(feature_columns, shap_values[0]),
+                 key=lambda x: abs(x[1]), reverse=True)[:3]
 
-    for f, v in top_features:
-        name = feature_name_map.get(f, f)
-
+    for f, v in top:
+        name = feature_map.get(f, f)
         if v > 0:
-            st.write(f"🔴 {name} increased risk")
+            st.write(f"🔴 High {name} increases financial stress → higher risk")
         else:
-            st.write(f"🟢 {name} reduced risk")
+            st.write(f"🟢 Lower {name} indicates better repayment capacity")
 
     # ============================================================
-    # REASONS
+    # DECISION LOGIC
     # ============================================================
 
-    st.markdown("### 🔍 Why this decision?")
-    for r in reasons:
-        st.write("✔", r)
+    st.markdown("## ⚖️ Decision Logic")
+
+    st.write(f"""
+    - PD < 20% → Approve  
+    - 20–40% → Review  
+    - >40% → Reject  
+
+    Current PD: {result['pd']:.2%} → {result['decision']}
+    """)
 
     # ============================================================
-    # RECOMMENDATIONS
-    # ============================================================
-
-    st.markdown("### Recommendations")
-    for r in recommendations:
-        st.write("➡️", r)
-
-    # ============================================================
-    # WHAT-IF SIMULATOR
+    # SIMULATOR
     # ============================================================
 
     st.markdown("## 🔄 What-if Simulator")
 
-    sim_payment = st.slider("Change Payment Amount", 0, int(BILL_AMT1), PAY_AMT1)
+    new_payment = st.slider("Change Payment", 0, int(BILL_AMT1), PAY_AMT1)
 
-    if st.button("Simulate Scenario"):
+    temp = input_df.copy()
+    temp["PAY_AMT1"] = new_payment
 
-        temp_df = input_df.copy()
-        temp_df["PAY_AMT1"] = sim_payment
+    sim = agent.run(temp)
 
-        sim_out = agent.run(temp_df)
+    col1, col2 = st.columns(2)
 
-        st.write("New PD:", f"{sim_out['result']['pd']:.2%}")
-        st.write("New Score:", sim_out['result']['credit_score'])
+    with col1:
+        st.write("### Current")
+        st.metric("PD", f"{result['pd']:.2%}")
+
+    with col2:
+        st.write("### Improved")
+        st.metric("PD", f"{sim['result']['pd']:.2%}")
 
     # ============================================================
-    # PDF REPORT
+    # MODEL RELIABILITY
     # ============================================================
 
-    st.markdown("## 📄 Download Report")
+    st.markdown("## 📊 Model Reliability")
 
-    if st.button("Generate PDF"):
+    st.write("""
+    - Cross-validation used
+    - ROC-AUC evaluated
+    - Bootstrap confidence intervals applied
+    - Probability calibration ensures realistic PD
+    """)
 
+    # ============================================================
+    # PDF DOWNLOAD (FIXED)
+    # ============================================================
+
+    def create_pdf():
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
 
         pdf.cell(200, 10, "Credit Risk Report", ln=True)
-        pdf.cell(200, 10, f"Score: {result['credit_score']}", ln=True)
         pdf.cell(200, 10, f"PD: {result['pd']:.2%}", ln=True)
         pdf.cell(200, 10, f"Decision: {result['decision']}", ln=True)
 
-        pdf.output("report.pdf")
+        buffer = BytesIO()
+        pdf.output(buffer)
+        buffer.seek(0)
+        return buffer
 
-        with open("report.pdf", "rb") as f:
-            st.download_button("Download PDF", f, "credit_report.pdf")
-
-    # ============================================================
-    # INSIGHT
-    # ============================================================
-
-    st.markdown("## 📊 Model Insight")
-
-    st.write(
-        "The model shows that repayment delays and high bill utilization "
-        "increase default risk, while higher payments reduce risk."
+    st.download_button(
+        "📄 Download Report",
+        create_pdf(),
+        "report.pdf"
     )
