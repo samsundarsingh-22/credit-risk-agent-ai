@@ -4,27 +4,19 @@ import numpy as np
 import joblib
 import shap
 import matplotlib.pyplot as plt
-from agent import CreditRiskAgent
 from io import BytesIO
 from fpdf import FPDF
 
 # ============================================================
-# PAGE CONFIG + STYLE
+# PAGE CONFIG
 # ============================================================
+
 st.set_page_config(page_title="AI Credit Risk System", layout="wide")
 
-st.markdown("""
-<style>
-.block-container {padding-top: 1rem;}
-h1, h2, h3 {color:#1f3b73;}
-.metric-card {background:#fff;border-radius:12px;padding:10px;box-shadow:0 2px 6px rgba(0,0,0,0.08);}
-.small {color:#666;font-size:0.9rem;}
-</style>
-""", unsafe_allow_html=True)
+# ============================================================
+# SESSION (LOGIN / SIGNUP)
+# ============================================================
 
-# ============================================================
-# SESSION INIT (LOGIN / SIGNUP)
-# ============================================================
 if "users" not in st.session_state:
     st.session_state.users = {"admin": "1234"}
 
@@ -34,83 +26,76 @@ if "logged_in" not in st.session_state:
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
-# ============================================================
-# AUTH PAGE (Login / Sign Up)
-# ============================================================
-def auth_page():
+
+def auth():
     st.title("🔐 AI Credit Risk System")
 
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
     with tab1:
-        u = st.text_input("Username", key="login_user")
-        p = st.text_input("Password", type="password", key="login_pwd")
+        st.info("Demo → admin / 1234")
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+
         if st.button("Login"):
-            if u in st.session_state.users and st.session_state.users[u] == p:
+            if user in st.session_state.users and st.session_state.users[user] == pwd:
                 st.session_state.logged_in = True
-                st.session_state.current_user = u
+                st.session_state.current_user = user
                 st.rerun()
             else:
                 st.error("Invalid credentials")
 
     with tab2:
-        nu = st.text_input("Create Username", key="signup_user")
-        npw = st.text_input("Create Password", type="password", key="signup_pwd")
-        if st.button("Sign Up"):
-            if nu in st.session_state.users:
-                st.warning("User already exists")
+        new_user = st.text_input("New Username")
+        new_pwd = st.text_input("New Password", type="password")
+
+        if st.button("Create Account"):
+            if new_user in st.session_state.users:
+                st.warning("User exists")
             else:
-                st.session_state.users[nu] = npw
-                st.success("Signup successful. Please login.")
+                st.session_state.users[new_user] = new_pwd
+                st.success("Account created")
+
 
 if not st.session_state.logged_in:
-    auth_page()
+    auth()
     st.stop()
 
 # ============================================================
-# LOAD MODEL
+# LOAD MODELS (IMPORTANT)
 # ============================================================
-model = joblib.load("credit_model.pkl")
+
+qsvc_model = joblib.load("qsvc_model.pkl")
+lgb_model = joblib.load("credit_model.pkl")
 calibrator = joblib.load("calibrator.pkl")
 scaler = joblib.load("scaler.pkl")
 feature_columns = joblib.load("feature_columns.pkl")
 
-agent = CreditRiskAgent(model, calibrator, scaler, feature_columns)
-explainer = shap.TreeExplainer(model)
+explainer = shap.TreeExplainer(lgb_model)
 
 # ============================================================
 # SIDEBAR
 # ============================================================
-st.sidebar.title("🏦 Dashboard")
-st.sidebar.write(f"User: **{st.session_state.current_user}**")
-st.sidebar.success("System Active")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📡 Engine")
-st.sidebar.write("Model: LightGBM")
-st.sidebar.write("Explainability: SHAP")
-st.sidebar.write("Mode: Agentic AI")
+st.sidebar.title("🏦 System Panel")
+st.sidebar.write(f"User: {st.session_state.current_user}")
+st.sidebar.success("System Active")
 
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
 # ============================================================
-# MAIN UI
+# HEADER
 # ============================================================
-st.title("🏦 AI Credit Risk Decision System")
-st.caption("CIBIL-style Report • Explainable AI • What-if Simulation")
 
-st.info("""
-**How to use**
-- Enter customer financials below
-- Click **Evaluate**
-- See decision, drivers, and simulate improvements
-""")
+st.title("🏦 AI Credit Risk Decision System")
+st.caption("QSVC + LightGBM + Calibration • Explainable AI • Simulator")
 
 # ============================================================
 # INPUTS
 # ============================================================
+
 repayment_map = {
     "Paid on time": 0,
     "1 month delay": 1,
@@ -118,26 +103,29 @@ repayment_map = {
     "3+ months delay": 3
 }
 
-colA, colB, colC = st.columns(3)
+st.subheader("👤 Customer Profile")
 
-with colA:
-    LIMIT_BAL = st.number_input("Credit Limit (₹)", value=200000, step=10000)
-    AGE = st.number_input("Age", value=35, min_value=18, max_value=100)
+col1, col2, col3 = st.columns(3)
 
-with colB:
-    PAY_0 = repayment_map[st.selectbox("Recent Repayment", list(repayment_map.keys()))]
-    PAY_2 = repayment_map[st.selectbox("Previous Repayment", list(repayment_map.keys()))]
+with col1:
+    LIMIT_BAL = st.slider("💳 Credit Limit (₹)", 10000, 10000000, 200000)
+    AGE = st.slider("Age", 18, 70, 30)
 
-with colC:
-    BILL_AMT1 = st.number_input("Latest Bill Amount (₹)", value=50000, step=1000)
-    PAY_AMT1 = st.number_input("Latest Payment (₹)", value=5000, step=1000)
+with col2:
+    PAY_0 = repayment_map[st.selectbox("Last Month Repayment", repayment_map.keys())]
+    PAY_2 = repayment_map[st.selectbox("2 Months Ago Repayment", repayment_map.keys())]
+
+with col3:
+    BILL_AMT1 = st.slider("Outstanding Bill (₹)", 0, 1000000, 50000)
+    PAY_AMT1 = st.slider("Payment Made (₹)", 0, 500000, 5000)
 
 # ============================================================
-# RUN MODEL
+# EVALUATION
 # ============================================================
-if st.button("🚀 Evaluate Credit Risk"):
 
-    # Build full feature vector
+if st.button("🚀 Evaluate Risk"):
+
+    # Prepare input
     input_data = {
         "LIMIT_BAL": LIMIT_BAL,
         "AGE": AGE,
@@ -146,173 +134,134 @@ if st.button("🚀 Evaluate Credit Risk"):
         "BILL_AMT1": BILL_AMT1,
         "PAY_AMT1": PAY_AMT1
     }
+
     for col in feature_columns:
         if col not in input_data:
             input_data[col] = 0
 
     input_df = pd.DataFrame([input_data])[feature_columns]
 
-    # Agent output
-    out = agent.run(input_df)
-    result = out["result"]
-    reasons = out.get("reasons", [])
-    recs = out.get("recommendations", [])
+    # ================================
+    # 3-LAYER MODEL PIPELINE
+    # ================================
 
-    # ========================================================
-    # DECISION DASHBOARD
-    # ========================================================
-    st.markdown("## 🧠 Decision Dashboard")
+    input_scaled = scaler.transform(input_df)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("PD", f"{result['pd']:.2%}")
-    c2.metric("Score", result["credit_score"])
-    c3.metric("Expected Loss", f"₹{result.get('expected_loss',0):,.0f}")
-    c4.metric("Decision", result["decision"])
+    # QSVC
+    qsvc_pred = qsvc_model.predict(input_scaled)[0]
 
-    # Color cue
-    if result["decision"] == "Approve":
-        st.success("✅ Recommended: Approve")
-    elif result["decision"] == "Manual Review":
-        st.warning("⚠️ Recommended: Manual Review")
-    else:
-        st.error("❌ Recommended: Reject")
+    # LightGBM
+    lgb_proba = lgb_model.predict_proba(input_scaled)[:, 1][0]
 
-    # ========================================================
+    # Calibrated PD
+    base_pd = calibrator.predict([lgb_proba])[0]
+
+    # ================================
     # DECISION LOGIC
-    # ========================================================
-    st.markdown("### ⚖️ Decision Logic")
-    st.write(f"""
-- **PD < 20% → Approve**  
-- **20–40% → Review**  
-- **> 40% → Reject**  
+    # ================================
 
-Current PD: **{result['pd']:.2%} → {result['decision']}**
-""")
+    if qsvc_pred == 1:
+        if base_pd > 0.20:
+            decision = "Reject"
+        else:
+            decision = "Manual Review"
+    else:
+        if base_pd < 0.10:
+            decision = "Approve"
+        elif base_pd < 0.25:
+            decision = "Manual Review"
+        else:
+            decision = "Reject"
 
-    # ========================================================
-    # SHAP (Clear + Creative)
-    # ========================================================
-    st.markdown("## 🔍 Risk Drivers (Explainability)")
+    score = int(300 + (1 - base_pd) * 600)
+    expected_loss = base_pd * LIMIT_BAL * 0.45
 
-    scaled = scaler.transform(input_df)
-    shap_values = explainer.shap_values(scaled)
+    # ============================================================
+    # OUTPUT DASHBOARD
+    # ============================================================
+
+    st.subheader("📊 Decision Dashboard")
+
+    d1, d2, d3, d4 = st.columns(4)
+
+    d1.metric("PD", f"{base_pd:.2%}")
+    d2.metric("Score", score)
+    d3.metric("Expected Loss", f"₹{expected_loss:,.0f}")
+    d4.metric("Decision", decision)
+
+    # ============================================================
+    # MODEL LAYERS
+    # ============================================================
+
+    st.subheader("🧠 Model Outputs")
+
+    m1, m2, m3 = st.columns(3)
+
+    m1.metric("QSVC", "High Risk" if qsvc_pred else "Normal")
+    m2.metric("LightGBM", f"{lgb_proba:.2%}")
+    m3.metric("Calibrated PD", f"{base_pd:.2%}")
+
+    # ============================================================
+    # SCORE GAUGE
+    # ============================================================
+
+    st.subheader("🎯 Credit Score")
+
+    fig, ax = plt.subplots()
+    ax.barh([0], [600], left=300)
+    ax.axvline(score)
+    ax.set_xlim(300, 900)
+    ax.set_yticks([])
+    st.pyplot(fig)
+
+    # ============================================================
+    # SHAP
+    # ============================================================
+
+    st.subheader("🔍 Explainability")
+
+    shap_values = explainer.shap_values(input_scaled)
+
     if isinstance(shap_values, list):
         shap_values = shap_values[1]
 
-    # Top features table
-    shap_df = pd.DataFrame({
-        "Feature": feature_columns,
-        "Impact": shap_values[0]
-    })
-    shap_df["Direction"] = np.where(shap_df["Impact"] >= 0, "↑ Increase Risk", "↓ Decrease Risk")
-    shap_df = shap_df.sort_values(by="Impact", key=np.abs, ascending=False).head(6)
-
-    st.dataframe(shap_df, use_container_width=True)
-
-    # Bar chart
     fig, ax = plt.subplots()
-    ax.barh(shap_df["Feature"], shap_df["Impact"])
-    ax.set_xlabel("Impact on Default Probability")
-    ax.set_ylabel("Features")
-    ax.invert_yaxis()
+    shap.summary_plot(shap_values, input_scaled, plot_type="bar", show=False)
     st.pyplot(fig)
 
-    # ========================================================
+    # ============================================================
     # SIMULATOR
-    # ========================================================
-    st.markdown("## 🔄 What-if Simulator")
+    # ============================================================
 
-    new_payment = st.slider("Increase Monthly Payment (₹)", 0, int(BILL_AMT1), PAY_AMT1)
+    st.subheader("🔄 Simulator")
 
-    temp = input_df.copy()
-    temp["PAY_AMT1"] = new_payment
+    new_payment = st.slider("Increase Payment", 0, int(BILL_AMT1), PAY_AMT1)
 
-    sim = agent.run(temp)
+    temp_df = input_df.copy()
+    temp_df["PAY_AMT1"] = new_payment
 
-    s1, s2 = st.columns(2)
-    s1.metric("Current PD", f"{result['pd']:.2%}")
-    s2.metric("New PD", f"{sim['result']['pd']:.2%}", delta=f"{sim['result']['pd']-result['pd']:.2%}")
+    sim_scaled = scaler.transform(temp_df)
+    sim_pd = calibrator.predict(
+        lgb_model.predict_proba(sim_scaled)[:, 1]
+    )[0]
 
-    # ========================================================
-    # REASONS & RECOMMENDATIONS
-    # ========================================================
-    st.markdown("## 📌 Key Risk Factors")
-    for r in reasons:
-        st.write("•", r)
+    st.write(f"New PD: {sim_pd:.2%}")
 
-    st.markdown("## 💡 Recommendations")
-    for r in recs:
-        st.write("•", r)
+    # ============================================================
+    # PDF REPORT
+    # ============================================================
 
-    # ========================================================
-    # PDF (CIBIL-style with tables)
-    # ========================================================
     def create_pdf():
         pdf = FPDF()
         pdf.add_page()
 
-        pdf.set_font("Arial", "B", 16)
-        pdf.cell(200, 10, "CREDIT RISK REPORT", ln=True, align="C")
+        pdf.set_font("Arial", size=12)
+        pdf.cell(200, 10, "AI CREDIT REPORT", ln=True)
 
-        pdf.set_font("Arial", "", 10)
-        pdf.cell(200, 8, f"Customer: {st.session_state.current_user}", ln=True)
-        pdf.cell(200, 8, f"Generated: {pd.Timestamp.now()}", ln=True)
-        pdf.ln(5)
+        pdf.cell(200, 10, f"PD: {base_pd:.2%}", ln=True)
+        pdf.cell(200, 10, f"Score: {score}", ln=True)
+        pdf.cell(200, 10, f"Decision: {decision}", ln=True)
 
-        # Customer table
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(200, 10, "Customer Information", ln=True)
+        return BytesIO(pdf.output(dest="S").encode("latin-1"))
 
-        pdf.set_font("Arial", "", 10)
-        rows = [
-            ("Credit Limit", LIMIT_BAL),
-            ("Age", AGE),
-            ("Latest Bill", BILL_AMT1),
-            ("Latest Payment", PAY_AMT1)
-        ]
-        for k,v in rows:
-            pdf.cell(100,8,k,1)
-            pdf.cell(100,8,str(v),1,ln=True)
-
-        pdf.ln(5)
-
-        # Risk summary
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(200, 10, "Risk Summary", ln=True)
-
-        rows = [
-            ("PD", f"{result['pd']:.2%}"),
-            ("Score", result["credit_score"]),
-            ("Decision", result["decision"])
-        ]
-        for k,v in rows:
-            pdf.cell(100,8,k,1)
-            pdf.cell(100,8,str(v),1,ln=True)
-
-        pdf.ln(5)
-
-        # Factors
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(200, 10, "Risk Factors", ln=True)
-        pdf.set_font("Arial", "", 10)
-        for r in reasons:
-            pdf.multi_cell(0,6,f"- {r}")
-
-        pdf.ln(3)
-
-        # Recommendations
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(200, 10, "Recommendations", ln=True)
-        pdf.set_font("Arial", "", 10)
-        for r in recs:
-            pdf.multi_cell(0,6,f"- {r}")
-
-        pdf_bytes = pdf.output(dest='S').encode('latin-1')
-        return BytesIO(pdf_bytes)
-
-    st.download_button(
-        "📄 Download Report",
-        create_pdf(),
-        file_name="credit_report.pdf",
-        mime="application/pdf"
-    )
+    st.download_button("📄 Download Report", create_pdf(), "report.pdf")
