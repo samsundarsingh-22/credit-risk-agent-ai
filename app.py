@@ -67,7 +67,7 @@ if "result" not in st.session_state:
     st.session_state.result = None
 
 # ============================================================
-# LOGIN / SIGNUP
+# LOGIN
 # ============================================================
 
 def login_page():
@@ -138,12 +138,28 @@ def rupee(x):
 def safe_text(x):
     return str(x).encode("latin-1", "replace").decode("latin-1")
 
-def get_risk_band(pd_value):
-    if pd_value < 0.10:
-        return "Low Risk"
-    elif pd_value < 0.25:
-        return "Medium Risk"
-    return "High Risk"
+def calculate_emi(principal, annual_rate, tenure_years):
+    monthly_rate = annual_rate / 12 / 100
+    months = tenure_years * 12
+
+    if principal <= 0 or months <= 0:
+        return 0
+
+    if monthly_rate == 0:
+        return principal / months
+
+    emi = (principal * monthly_rate * (1 + monthly_rate) ** months) / (
+        ((1 + monthly_rate) ** months) - 1
+    )
+    return emi
+
+def calculate_foir(existing_emi, new_emi, monthly_income):
+    if monthly_income <= 0:
+        return 100
+    return ((existing_emi + new_emi) / monthly_income) * 100
+
+def calculate_utilisation(outstanding, limit):
+    return (outstanding / max(limit, 1)) * 100
 
 def get_score_band(score):
     if score >= 750:
@@ -156,19 +172,35 @@ def get_score_band(score):
         return "Poor"
     return "Very Poor"
 
-def decision_logic(pd_value, qsvc_signal):
-    if qsvc_signal == 1 and pd_value >= 0.20:
-        return "Reject"
-    if qsvc_signal == 1 and pd_value < 0.20:
-        return "Manual Review"
-
+def get_risk_band(pd_value):
     if pd_value < 0.10:
-        return "Approve"
+        return "Low Risk"
     elif pd_value < 0.25:
-        return "Manual Review"
-    return "Reject"
+        return "Medium Risk"
+    return "High Risk"
 
-def apply_financial_adjustment(pd_value, emi, savings, mutual_funds, stocks, property, vehicle):
+def final_decision_engine(pd_value, qsvc_signal, foir, utilisation):
+    if foir > 55:
+        return "Reject", "High FOIR indicates weak repayment capacity"
+
+    if utilisation > 80:
+        return "Reject", "Credit utilisation is very high"
+
+    if pd_value > 0.40:
+        return "Reject", "High probability of default"
+
+    if qsvc_signal == 1 and pd_value >= 0.20:
+        return "Reject", "QSVC high-risk signal with elevated PD"
+
+    if pd_value > 0.20 or foir > 40:
+        return "Manual Review", "Moderate risk or repayment burden"
+
+    if qsvc_signal == 1:
+        return "Manual Review", "QSVC high-risk signal requires analyst review"
+
+    return "Approve", "Meets risk and affordability criteria"
+
+def apply_financial_adjustment(pd_value, savings, mutual_funds, stocks, property, vehicle):
     adjusted_pd = pd_value
     total_assets = savings + mutual_funds + stocks
 
@@ -186,11 +218,6 @@ def apply_financial_adjustment(pd_value, emi, savings, mutual_funds, stocks, pro
         adjusted_pd *= 0.95
     elif vehicle == "Two Wheeler":
         adjusted_pd *= 0.98
-
-    if emi >= 50000:
-        adjusted_pd *= 1.20
-    if emi >= 100000:
-        adjusted_pd *= 1.35
 
     return min(max(adjusted_pd, 0.01), 0.95)
 
@@ -215,20 +242,19 @@ def run_model(data):
     scaled = scaler.transform(input_df)
 
     lgb_probability = lgb_model.predict_proba(scaled)[:, 1][0]
-    calibrated_pd = calibrator.predict([lgb_probability])[0]
-    calibrated_pd = min(max(calibrated_pd, 0.01), 0.95)
+    base_pd = calibrator.predict([lgb_probability])[0]
+    base_pd = min(max(base_pd, 0.01), 0.95)
 
     try:
         if qsvc_available:
             qsvc_signal = qsvc_model.predict(scaled)[0]
         else:
-            qsvc_signal = 1 if calibrated_pd > 0.25 else 0
+            qsvc_signal = 1 if base_pd > 0.25 else 0
     except Exception:
-        qsvc_signal = 1 if calibrated_pd > 0.25 else 0
+        qsvc_signal = 1 if base_pd > 0.25 else 0
 
     adjusted_pd = apply_financial_adjustment(
-        calibrated_pd,
-        data["EMI"],
+        base_pd,
         data["SAVINGS"],
         data["MUTUAL_FUNDS"],
         data["STOCKS"],
@@ -236,29 +262,58 @@ def run_model(data):
         data["VEHICLE"]
     )
 
+    new_emi = calculate_emi(
+        data["REQUESTED_LOAN_AMOUNT"],
+        data["INTEREST_RATE"],
+        data["TENURE"]
+    )
+
+    foir = calculate_foir(
+        data["EXISTING_EMI"],
+        new_emi,
+        data["MONTHLY_INCOME"]
+    )
+
+    utilisation = calculate_utilisation(
+        data["BILL_AMT1"],
+        data["LIMIT_BAL"]
+    )
+
+    decision, decision_reason = final_decision_engine(
+        adjusted_pd,
+        qsvc_signal,
+        foir,
+        utilisation
+    )
+
     score = int(300 + (1 - adjusted_pd) * 600)
     expected_loss = adjusted_pd * data["LIMIT_BAL"] * 0.45
-    risk_band = get_risk_band(adjusted_pd)
-    score_band = get_score_band(score)
-    decision = decision_logic(adjusted_pd, qsvc_signal)
+
+    eligible_loan_multiplier = data["MONTHLY_INCOME"] * 15
+    max_new_emi_40_rule = max((data["MONTHLY_INCOME"] * 0.40) - data["EXISTING_EMI"], 0)
 
     return {
         "input_df": input_df,
         "scaled": scaled,
         "lgb_probability": lgb_probability,
-        "base_pd": calibrated_pd,
+        "base_pd": base_pd,
         "adjusted_pd": adjusted_pd,
         "qsvc_signal": qsvc_signal,
         "score": score,
         "expected_loss": expected_loss,
-        "risk_band": risk_band,
-        "score_band": score_band,
-        "decision": decision
+        "risk_band": get_risk_band(adjusted_pd),
+        "score_band": get_score_band(score),
+        "decision": decision,
+        "decision_reason": decision_reason,
+        "new_emi": new_emi,
+        "foir": foir,
+        "utilisation": utilisation,
+        "eligible_loan_multiplier": eligible_loan_multiplier,
+        "max_new_emi_40_rule": max_new_emi_40_rule
     }
 
 def create_score_gauge(score):
     fig, ax = plt.subplots(figsize=(7.5, 2.7))
-
     segments = [
         (300, 500, "Very Poor"),
         (500, 650, "Poor"),
@@ -278,12 +333,10 @@ def create_score_gauge(score):
     ax.set_xlabel("Credit Score Range")
     ax.set_title("CIBIL-style Credit Score Gauge")
     ax.spines[["top", "right", "left"]].set_visible(False)
-
     return fig
 
 def create_risk_meter(pd_value):
     fig, ax = plt.subplots(figsize=(7.5, 2.7))
-
     segments = [
         (0.00, 0.10, "Low Risk"),
         (0.10, 0.25, "Medium Risk"),
@@ -301,29 +354,38 @@ def create_risk_meter(pd_value):
     ax.set_xlabel("Probability of Default")
     ax.set_title("Default Risk Meter")
     ax.spines[["top", "right", "left"]].set_visible(False)
-
     return fig
 
 def generate_cibil_report_data(data):
-    utilisation_pct = round((data["BILL_AMT1"] / max(data["LIMIT_BAL"], 1)) * 100, 2)
+    utilisation_pct = round(calculate_utilisation(data["BILL_AMT1"], data["LIMIT_BAL"]), 2)
+    new_emi = calculate_emi(data["REQUESTED_LOAN_AMOUNT"], data["INTEREST_RATE"], data["TENURE"])
 
     accounts = pd.DataFrame([
         {
             "Account Type": "Credit Card",
             "Institution": "HDFC Bank",
-            "Credit Limit / Loan Amount": rupee(data["LIMIT_BAL"]),
-            "Outstanding": rupee(data["BILL_AMT1"]),
-            "EMI": "-",
+            "Sanctioned / Limit": rupee(data["LIMIT_BAL"]),
+            "Current Balance": rupee(data["BILL_AMT1"]),
+            "Overdue": rupee(0 if data["PAY_0"] == 0 else data["PAY_AMT1"]),
             "Status": "Active",
             "Utilisation": f"{utilisation_pct}%"
         },
         {
-            "Account Type": "Personal Loan",
+            "Account Type": "Existing Personal Loan",
             "Institution": "ICICI Bank",
-            "Credit Limit / Loan Amount": rupee(data["EMI"] * data["TENURE"] * 12),
-            "Outstanding": rupee(data["EMI"] * data["TENURE"] * 12),
-            "EMI": rupee(data["EMI"]),
+            "Sanctioned / Limit": rupee(data["EXISTING_EMI"] * data["TENURE"] * 12),
+            "Current Balance": rupee(data["EXISTING_EMI"] * data["TENURE"] * 12),
+            "Overdue": rupee(0),
             "Status": "Active",
+            "Utilisation": "-"
+        },
+        {
+            "Account Type": "Requested Personal Loan",
+            "Institution": "AI Bank",
+            "Sanctioned / Limit": rupee(data["REQUESTED_LOAN_AMOUNT"]),
+            "Current Balance": rupee(data["REQUESTED_LOAN_AMOUNT"]),
+            "Overdue": rupee(0),
+            "Status": "Proposed",
             "Utilisation": "-"
         }
     ])
@@ -340,14 +402,33 @@ def generate_cibil_report_data(data):
         ]
     })
 
-    utilisation = pd.DataFrame({
-        "Metric": ["Credit Limit", "Outstanding Balance", "Credit Utilisation"],
+    affordability = pd.DataFrame({
+        "Metric": [
+            "Monthly Income",
+            "Existing EMI",
+            "Requested Loan Amount",
+            "New EMI",
+            "FOIR",
+            "Credit Utilisation",
+            "Max EMI by 40% Rule",
+            "Multiplier Eligibility"
+        ],
         "Value": [
-            rupee(data["LIMIT_BAL"]),
-            rupee(data["BILL_AMT1"]),
-            f"{utilisation_pct}%"
+            rupee(data["MONTHLY_INCOME"]),
+            rupee(data["EXISTING_EMI"]),
+            rupee(data["REQUESTED_LOAN_AMOUNT"]),
+            rupee(new_emi),
+            f"{calculate_foir(data['EXISTING_EMI'], new_emi, data['MONTHLY_INCOME']):.2f}%",
+            f"{utilisation_pct}%",
+            rupee(max((data["MONTHLY_INCOME"] * 0.40) - data["EXISTING_EMI"], 0)),
+            rupee(data["MONTHLY_INCOME"] * 15)
         ]
     })
+
+    enquiries = pd.DataFrame([
+        {"Date": "2026-04-01", "Institution": "ABC Bank", "Purpose": "Credit Card", "Amount": rupee(50000)},
+        {"Date": "2026-03-18", "Institution": "XYZ Finance", "Purpose": "Personal Loan", "Amount": rupee(200000)}
+    ])
 
     signals = []
     if data["PAY_0"] > 0:
@@ -359,7 +440,60 @@ def generate_cibil_report_data(data):
     if not signals:
         signals.append("No adverse credit behaviour detected.")
 
-    return accounts, payment_history, utilisation, signals
+    return accounts, payment_history, affordability, enquiries, signals
+
+def auto_approval_optimizer(data, current_result):
+    if current_result["decision"] == "Approve":
+        return {
+            "status": "Already Eligible",
+            "message": "Customer already satisfies approval threshold.",
+            "scenario": data,
+            "result": current_result
+        }
+
+    best = None
+
+    candidate_outstanding = range(data["BILL_AMT1"], -1, -5000)
+    candidate_payment = range(data["PAY_AMT1"], max(data["BILL_AMT1"], data["PAY_AMT1"]) + 1, 5000)
+    candidate_loan = range(data["REQUESTED_LOAN_AMOUNT"], 50000 - 1, -50000)
+
+    for outstanding in list(candidate_outstanding)[:80]:
+        for payment in list(candidate_payment)[:50]:
+            for loan_amount in list(candidate_loan)[:50]:
+                scenario = data.copy()
+                scenario["BILL_AMT1"] = outstanding
+                scenario["PAY_AMT1"] = min(payment, max(outstanding, 1))
+                scenario["PAY_0"] = 0
+                scenario["PAY_0_WORD"] = "Paid on time"
+                scenario["REQUESTED_LOAN_AMOUNT"] = loan_amount
+
+                result = run_model(scenario)
+
+                if result["decision"] == "Approve":
+                    change_cost = (
+                        abs(data["BILL_AMT1"] - scenario["BILL_AMT1"]) +
+                        abs(data["REQUESTED_LOAN_AMOUNT"] - scenario["REQUESTED_LOAN_AMOUNT"]) * 0.3 +
+                        abs(data["PAY_AMT1"] - scenario["PAY_AMT1"])
+                    )
+
+                    if best is None or change_cost < best["change_cost"]:
+                        best = {
+                            "status": "Approval Path Found",
+                            "message": "Minimum practical changes identified for approval.",
+                            "scenario": scenario,
+                            "result": result,
+                            "change_cost": change_cost
+                        }
+
+    if best is None:
+        return {
+            "status": "Approval Not Found",
+            "message": "Approval may require higher income, lower obligations, collateral, or manual underwriting.",
+            "scenario": data,
+            "result": current_result
+        }
+
+    return best
 
 # ============================================================
 # SIDEBAR
@@ -373,6 +507,7 @@ st.sidebar.write("Layer 1: QSVC - Best PR-AUC")
 st.sidebar.write("Layer 2: LightGBM - Best Accuracy")
 st.sidebar.write("Layer 3: Calibrated LightGBM - Final PD")
 st.sidebar.markdown("---")
+st.sidebar.write("Underwriting: FOIR + EMI + Utilisation")
 st.sidebar.write(f"QSVC: {'Available' if qsvc_available else 'Fallback Mode'}")
 
 if st.sidebar.button("Logout"):
@@ -389,7 +524,7 @@ if st.sidebar.button("Logout"):
 st.markdown(f"""
 <div class="main-header">
     <h1>AI Credit Risk Decision System</h1>
-    <p>CIBIL-style dashboard | QSVC + LightGBM + Calibrated PD | Analyst: {st.session_state.user}</p>
+    <p>CIBIL-style dashboard | QSVC + LightGBM + Calibrated PD | FOIR Underwriting | Analyst: {st.session_state.user}</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -414,7 +549,7 @@ repayment_map = {
 }
 
 # ============================================================
-# TAB 1: CUSTOMER PROFILE
+# TAB 1
 # ============================================================
 
 with tab1:
@@ -423,40 +558,33 @@ with tab1:
     st.markdown("""
     <div class="card">
     <b>Input Guide</b><br>
-    Credit limit is the maximum approved exposure. Repayment status captures recent delay behaviour.
-    Outstanding balance is the unpaid card bill. Payment made is the amount paid towards the bill.
-    EMI, savings, investments, property and vehicle ownership are used as financial strength indicators.
+    The final decision is not based only on machine learning probability.
+    It uses calibrated PD, FOIR/DTI, EMI affordability, credit utilisation, repayment behaviour and asset strength.
     </div>
     """, unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
 
     with c1:
+        MONTHLY_INCOME = st.slider("Monthly Income (Rs.)", 10000, 500000, 50000, step=5000)
         LIMIT_BAL = st.slider("Credit Limit / Exposure (Rs.)", 10000, 10000000, 200000, step=10000)
         AGE = st.slider("Age", 18, 70, 30)
 
     with c2:
+        REQUESTED_LOAN_AMOUNT = st.slider("Requested Loan Amount (Rs.)", 50000, 5000000, 300000, step=50000)
+        EXISTING_EMI = st.slider("Existing Monthly EMI (Rs.)", 0, 300000, 10000, step=5000)
+        INTEREST_RATE = st.slider("Loan Interest Rate (%)", 5.0, 36.0, 12.0, step=0.5)
+        TENURE = st.slider("Loan Tenure (Years)", 1, 30, 5)
+
+    with c3:
         PAY_0_WORD = st.selectbox("Credit Card Repayment - Last Month", list(repayment_map.keys()))
         PAY_2_WORD = st.selectbox("Credit Card Repayment - 2 Months Ago", list(repayment_map.keys()))
         PAY_0 = repayment_map[PAY_0_WORD]
         PAY_2 = repayment_map[PAY_2_WORD]
-
-    with c3:
         BILL_AMT1 = st.slider("Credit Card Outstanding Balance (Rs.)", 0, 1000000, 50000, step=5000)
         PAY_AMT1 = st.slider("Amount Paid Towards Credit Card (Rs.)", 0, 500000, 5000, step=5000)
 
-    st.markdown("### Loan and Asset Information")
-
-    l1, l2, l3 = st.columns(3)
-
-    with l1:
-        EMI = st.slider("Monthly Personal Loan EMI (Rs.)", 0, 200000, 10000, step=5000)
-
-    with l2:
-        INTEREST_RATE = st.slider("Personal Loan Interest Rate (%)", 5.0, 36.0, 12.0, step=0.5)
-
-    with l3:
-        TENURE = st.slider("Loan Tenure (Years)", 1, 30, 5)
+    st.markdown("### Assets and Financial Strength")
 
     a1, a2, a3 = st.columns(3)
 
@@ -479,17 +607,19 @@ with tab1:
 
     if st.button("Evaluate Credit Risk"):
         st.session_state.input_data = {
+            "MONTHLY_INCOME": MONTHLY_INCOME,
             "LIMIT_BAL": LIMIT_BAL,
             "AGE": AGE,
+            "REQUESTED_LOAN_AMOUNT": REQUESTED_LOAN_AMOUNT,
+            "EXISTING_EMI": EXISTING_EMI,
+            "INTEREST_RATE": INTEREST_RATE,
+            "TENURE": TENURE,
             "PAY_0": PAY_0,
             "PAY_2": PAY_2,
             "PAY_0_WORD": PAY_0_WORD,
             "PAY_2_WORD": PAY_2_WORD,
             "BILL_AMT1": BILL_AMT1,
             "PAY_AMT1": PAY_AMT1,
-            "EMI": EMI,
-            "INTEREST_RATE": INTEREST_RATE,
-            "TENURE": TENURE,
             "SAVINGS": SAVINGS,
             "MUTUAL_FUNDS": MUTUAL_FUNDS,
             "STOCKS": STOCKS,
@@ -500,12 +630,11 @@ with tab1:
         st.session_state.result = run_model(st.session_state.input_data)
         st.success("Assessment completed. Open the Decision Dashboard tab.")
 
-# Auto refresh result after first evaluation
 if st.session_state.input_data is not None:
     st.session_state.result = run_model(st.session_state.input_data)
 
 # ============================================================
-# TAB 2: DECISION DASHBOARD
+# TAB 2
 # ============================================================
 
 with tab2:
@@ -518,16 +647,26 @@ with tab2:
 
         d1, d2, d3, d4 = st.columns(4)
         d1.metric("Adjusted PD", f"{r['adjusted_pd']:.2%}")
-        d2.metric("AI Credit Score", r["score"])
-        d3.metric("Expected Loss", rupee(r["expected_loss"]))
+        d2.metric("FOIR", f"{r['foir']:.2f}%")
+        d3.metric("AI Credit Score", r["score"])
         d4.metric("Decision", r["decision"])
 
-        if r["risk_band"] == "Low Risk":
-            st.markdown('<div class="low">LOW RISK: Customer appears suitable for approval.</div>', unsafe_allow_html=True)
-        elif r["risk_band"] == "Medium Risk":
-            st.markdown('<div class="medium">MEDIUM RISK: Manual review is recommended.</div>', unsafe_allow_html=True)
+        if r["decision"] == "Approve":
+            st.markdown('<div class="low">APPROVED: Customer satisfies risk and affordability criteria.</div>', unsafe_allow_html=True)
+        elif r["decision"] == "Manual Review":
+            st.markdown('<div class="medium">MANUAL REVIEW: Profile requires analyst review.</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="high">HIGH RISK: Reject or request stronger verification.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="high">REJECTED: Customer fails one or more underwriting rules.</div>', unsafe_allow_html=True)
+
+        st.markdown("## Underwriting Summary")
+
+        u1, u2, u3, u4 = st.columns(4)
+        u1.metric("New EMI", rupee(r["new_emi"]))
+        u2.metric("Max EMI by 40% Rule", rupee(r["max_new_emi_40_rule"]))
+        u3.metric("Credit Utilisation", f"{r['utilisation']:.2f}%")
+        u4.metric("Eligible Loan by Multiplier", rupee(r["eligible_loan_multiplier"]))
+
+        st.markdown(f"**Decision Reason:** {r['decision_reason']}")
 
         st.markdown("## Three-Layer Model Intelligence")
         m1, m2, m3 = st.columns(3)
@@ -544,7 +683,7 @@ with tab2:
             st.write(f"Risk Band: **{r['risk_band']}**")
 
 # ============================================================
-# TAB 3: RISK ANALYSIS
+# TAB 3
 # ============================================================
 
 with tab3:
@@ -588,7 +727,7 @@ with tab3:
         st.pyplot(fig)
 
 # ============================================================
-# TAB 4: SIMULATOR
+# TAB 4
 # ============================================================
 
 with tab4:
@@ -598,35 +737,65 @@ with tab4:
         r = st.session_state.result
         d = st.session_state.input_data
 
-        st.markdown("## What-if Simulator")
+        st.markdown("## Smart What-if Simulator")
 
-        sim_payment = st.slider(
-            "Simulate Credit Card Payment (Rs.)",
-            0,
-            int(max(d["BILL_AMT1"], 1)),
-            int(d["PAY_AMT1"]),
-            step=5000
-        )
+        s1, s2, s3 = st.columns(3)
 
-        sim_repayment_word = st.selectbox(
-            "Simulate Repayment Behaviour",
-            list(repayment_map.keys())
-        )
+        with s1:
+            sim_income = st.slider("Simulate Monthly Income (Rs.)", 10000, 500000, int(d["MONTHLY_INCOME"]), step=5000)
+            sim_loan = st.slider("Simulate Requested Loan Amount (Rs.)", 50000, 5000000, int(d["REQUESTED_LOAN_AMOUNT"]), step=50000)
+
+        with s2:
+            sim_existing_emi = st.slider("Simulate Existing EMI (Rs.)", 0, 300000, int(d["EXISTING_EMI"]), step=5000)
+            sim_outstanding = st.slider("Simulate Outstanding Balance (Rs.)", 0, int(d["LIMIT_BAL"]), int(d["BILL_AMT1"]), step=5000)
+
+        with s3:
+            sim_payment = st.slider("Simulate Card Payment (Rs.)", 0, int(max(d["BILL_AMT1"], 1)), int(d["PAY_AMT1"]), step=5000)
+            sim_repayment_word = st.selectbox("Simulate Repayment Behaviour", list(repayment_map.keys()), index=list(repayment_map.keys()).index(d["PAY_0_WORD"]))
 
         sim_data = d.copy()
+        sim_data["MONTHLY_INCOME"] = sim_income
+        sim_data["REQUESTED_LOAN_AMOUNT"] = sim_loan
+        sim_data["EXISTING_EMI"] = sim_existing_emi
+        sim_data["BILL_AMT1"] = sim_outstanding
         sim_data["PAY_AMT1"] = sim_payment
         sim_data["PAY_0"] = repayment_map[sim_repayment_word]
         sim_data["PAY_0_WORD"] = sim_repayment_word
 
         sim_result = run_model(sim_data)
 
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Current PD", f"{r['adjusted_pd']:.2%}")
-        s2.metric("Simulated PD", f"{sim_result['adjusted_pd']:.2%}", delta=f"{sim_result['adjusted_pd'] - r['adjusted_pd']:.2%}")
-        s3.metric("Simulated Decision", sim_result["decision"])
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Current FOIR", f"{r['foir']:.2f}%")
+        c2.metric("Simulated FOIR", f"{sim_result['foir']:.2f}%", delta=f"{sim_result['foir'] - r['foir']:.2f}%")
+        c3.metric("Simulated PD", f"{sim_result['adjusted_pd']:.2%}", delta=f"{sim_result['adjusted_pd'] - r['adjusted_pd']:.2%}")
+        c4.metric("Simulated Decision", sim_result["decision"])
+
+        st.markdown("## Auto-Approval Optimizer")
+
+        if st.button("Find Minimum Changes for Approval"):
+            opt = auto_approval_optimizer(d, r)
+
+            st.subheader(opt["status"])
+            st.write(opt["message"])
+
+            opt_result = opt["result"]
+            opt_scenario = opt["scenario"]
+
+            o1, o2, o3, o4 = st.columns(4)
+            o1.metric("Optimized PD", f"{opt_result['adjusted_pd']:.2%}")
+            o2.metric("Optimized FOIR", f"{opt_result['foir']:.2f}%")
+            o3.metric("Optimized Score", opt_result["score"])
+            o4.metric("Optimized Decision", opt_result["decision"])
+
+            st.markdown("### Recommended Changes")
+            st.write(f"- Requested Loan Amount: {rupee(d['REQUESTED_LOAN_AMOUNT'])} → {rupee(opt_scenario['REQUESTED_LOAN_AMOUNT'])}")
+            st.write(f"- Outstanding Balance: {rupee(d['BILL_AMT1'])} → {rupee(opt_scenario['BILL_AMT1'])}")
+            st.write(f"- Card Payment: {rupee(d['PAY_AMT1'])} → {rupee(opt_scenario['PAY_AMT1'])}")
+            st.write("- Repayment behaviour: Paid on time")
 
 # ============================================================
-# TAB 5: CIBIL REPORT
+# TAB 5
 # ============================================================
 
 with tab5:
@@ -636,7 +805,7 @@ with tab5:
         r = st.session_state.result
         d = st.session_state.input_data
 
-        accounts, payment_history, utilisation, signals = generate_cibil_report_data(d)
+        accounts, payment_history, affordability, enquiries, signals = generate_cibil_report_data(d)
 
         st.markdown("## Credit Bureau Report - CIBIL Style")
 
@@ -644,7 +813,7 @@ with tab5:
         c1.metric("Credit Score", r["score"])
         c2.metric("Risk Band", r["risk_band"])
         c3.metric("Decision", r["decision"])
-        c4.metric("PD", f"{r['adjusted_pd']:.2%}")
+        c4.metric("FOIR", f"{r['foir']:.2f}%")
 
         st.markdown("### Credit Accounts")
         st.dataframe(accounts, use_container_width=True)
@@ -652,15 +821,18 @@ with tab5:
         st.markdown("### Payment History - Last 6 Months")
         st.dataframe(payment_history, use_container_width=True)
 
-        st.markdown("### Credit Utilisation")
-        st.dataframe(utilisation, use_container_width=True)
+        st.markdown("### Affordability and Eligibility")
+        st.dataframe(affordability, use_container_width=True)
+
+        st.markdown("### Recent Enquiries")
+        st.dataframe(enquiries, use_container_width=True)
 
         st.markdown("### Risk Signals")
         for signal in signals:
             st.write("•", signal)
 
 # ============================================================
-# TAB 6: PDF DOWNLOAD
+# TAB 6
 # ============================================================
 
 with tab6:
@@ -669,10 +841,9 @@ with tab6:
     else:
         r = st.session_state.result
         d = st.session_state.input_data
-        accounts, payment_history, utilisation, signals = generate_cibil_report_data(d)
+        accounts, payment_history, affordability, enquiries, signals = generate_cibil_report_data(d)
 
-        st.markdown("## Download CIBIL-style Credit Report")
-        st.write("The PDF includes customer information, model summary, account table, payment history, utilisation and risk signals.")
+        st.markdown("## Download Full CIBIL-style Credit Report")
 
         def create_pdf():
             pdf = FPDF()
@@ -697,22 +868,17 @@ with tab6:
                     pdf.cell(100, 7, safe_text(v), 1, ln=True)
                 pdf.ln(4)
 
-            section("1. Customer Information")
+            section("1. Customer and Loan Information")
             table_rows([
+                ("Monthly Income", rupee(d["MONTHLY_INCOME"])),
                 ("Credit Limit", rupee(d["LIMIT_BAL"])),
-                ("Age", d["AGE"]),
-                ("Outstanding Balance", rupee(d["BILL_AMT1"])),
-                ("Payment Made", rupee(d["PAY_AMT1"])),
-                ("Last Month Repayment", d["PAY_0_WORD"]),
-                ("2 Months Ago Repayment", d["PAY_2_WORD"]),
-                ("Monthly EMI", rupee(d["EMI"])),
-                ("Interest Rate", f"{d['INTEREST_RATE']}%"),
-                ("Tenure", f"{d['TENURE']} years"),
-                ("Savings", rupee(d["SAVINGS"])),
-                ("Mutual Funds", rupee(d["MUTUAL_FUNDS"])),
-                ("Stocks", rupee(d["STOCKS"])),
-                ("Property", d["PROPERTY"]),
-                ("Vehicle", d["VEHICLE"])
+                ("Requested Loan", rupee(d["REQUESTED_LOAN_AMOUNT"])),
+                ("Existing EMI", rupee(d["EXISTING_EMI"])),
+                ("New EMI", rupee(r["new_emi"])),
+                ("FOIR", f"{r['foir']:.2f}%"),
+                ("Credit Utilisation", f"{r['utilisation']:.2f}%"),
+                ("Max EMI by 40% Rule", rupee(r["max_new_emi_40_rule"])),
+                ("Multiplier Eligibility", rupee(r["eligible_loan_multiplier"]))
             ])
 
             section("2. Risk Summary")
@@ -725,17 +891,19 @@ with tab6:
                 ("Score Band", r["score_band"]),
                 ("Risk Band", r["risk_band"]),
                 ("Expected Loss", rupee(r["expected_loss"])),
-                ("Decision", r["decision"])
+                ("Decision", r["decision"]),
+                ("Decision Reason", r["decision_reason"])
             ])
 
             section("3. Credit Accounts")
             for _, row in accounts.iterrows():
                 pdf.multi_cell(0, 6, safe_text(
                     f"{row['Account Type']} | {row['Institution']} | "
-                    f"Limit/Loan: {row['Credit Limit / Loan Amount']} | "
-                    f"Outstanding: {row['Outstanding']} | Status: {row['Status']}"
+                    f"Limit/Loan: {row['Sanctioned / Limit']} | "
+                    f"Balance: {row['Current Balance']} | Overdue: {row['Overdue']} | "
+                    f"Status: {row['Status']} | Utilisation: {row['Utilisation']}"
                 ))
-            pdf.ln(3)
+            pdf.ln(4)
 
             section("4. Payment History")
             for _, row in payment_history.iterrows():
@@ -743,13 +911,20 @@ with tab6:
                 pdf.cell(100, 7, safe_text(row["Payment Status"]), 1, ln=True)
             pdf.ln(4)
 
-            section("5. Credit Utilisation")
-            for _, row in utilisation.iterrows():
+            section("5. Affordability and Eligibility")
+            for _, row in affordability.iterrows():
                 pdf.cell(90, 7, safe_text(row["Metric"]), 1)
                 pdf.cell(100, 7, safe_text(row["Value"]), 1, ln=True)
             pdf.ln(4)
 
-            section("6. Risk Signals")
+            section("6. Recent Enquiries")
+            for _, row in enquiries.iterrows():
+                pdf.multi_cell(0, 6, safe_text(
+                    f"{row['Date']} | {row['Institution']} | {row['Purpose']} | Amount: {row['Amount']}"
+                ))
+            pdf.ln(4)
+
+            section("7. Risk Signals")
             for signal in signals:
                 pdf.multi_cell(0, 6, safe_text(f"- {signal}"))
 
