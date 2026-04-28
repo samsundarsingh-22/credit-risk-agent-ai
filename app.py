@@ -15,16 +15,35 @@ from tools import (
     calculate_utilisation,
     derive_dpd_from_history,
     apply_stress_scenario,
-    simulate_credit_losses,
     BASEL_CAR_THRESHOLD,
-    LGD_DEFAULT
+    LGD_DEFAULT,
 )
+
+# Safe imports for different tools.py versions
+try:
+    from tools import simulate_credit_losses
+except ImportError:
+    from tools import simulate_single_credit_losses as simulate_credit_losses
+
+try:
+    from tools import simulate_correlated_portfolio_var
+except ImportError:
+    simulate_correlated_portfolio_var = None
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
     page_title="AI Credit Risk System",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ============================================================
+# STYLE
+# ============================================================
 
 st.markdown("""
 <style>
@@ -51,6 +70,7 @@ html, body, [class*="css"] {font-family: "Segoe UI", sans-serif;}
 .high {background:#ffd6d6;color:#8b0000;padding:14px;border-radius:12px;font-weight:700;}
 </style>
 """, unsafe_allow_html=True)
+
 
 # ============================================================
 # SESSION STATE
@@ -100,6 +120,7 @@ if "portfolio_df" not in st.session_state:
         "Standardised RWA", "Standardised CAR", "IRB RWA", "IRB CAR", "Decision"
     ])
 
+
 # ============================================================
 # LOGIN
 # ============================================================
@@ -140,9 +161,11 @@ def login_page():
                 st.session_state.users[new_user] = new_pwd
                 st.success("Account created. Please sign in.")
 
+
 if not st.session_state.logged_in:
     login_page()
     st.stop()
+
 
 # ============================================================
 # LOAD MODELS
@@ -169,6 +192,7 @@ agent = CreditRiskAgent(
 )
 
 explainer = shap.TreeExplainer(model)
+
 
 # ============================================================
 # CONSTANTS
@@ -199,6 +223,7 @@ repayment_map = {
     "2 months delay": 2,
     "3+ months delay": 3
 }
+
 
 # ============================================================
 # APP HELPERS
@@ -269,7 +294,7 @@ def create_risk_meter(pd_value):
 
 
 def auto_approval_optimizer(data, current_result):
-    if current_result["decision"] == "Approve":
+    if current_result.get("decision") == "Approve":
         return {
             "status": "Already Eligible",
             "message": "Customer already satisfies approval threshold.",
@@ -295,7 +320,7 @@ def auto_approval_optimizer(data, current_result):
                 output = agent.run(scenario)
                 result = output["result"]
 
-                if result["decision"] == "Approve":
+                if result.get("decision") == "Approve":
                     change_cost = (
                         abs(data["BILL_AMT1"] - scenario["BILL_AMT1"]) +
                         abs(data["REQUESTED_LOAN_AMOUNT"] - scenario["REQUESTED_LOAN_AMOUNT"]) * 0.30 +
@@ -322,6 +347,14 @@ def auto_approval_optimizer(data, current_result):
     return best
 
 
+def run_current_assessment():
+    if st.session_state.input_data is not None:
+        output = agent.run(st.session_state.input_data)
+        st.session_state.result = output["result"]
+        st.session_state.reasons = output["reasons"]
+        st.session_state.recommendations = output["recommendations"]
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -346,6 +379,7 @@ if st.sidebar.button("Logout"):
     st.session_state.result = None
     st.rerun()
 
+
 # ============================================================
 # HEADER
 # ============================================================
@@ -356,6 +390,7 @@ st.markdown(f"""
     <p>CIBIL-style bureau input | QSVC + LightGBM + Calibrated PD | IFRS 9 ECL | Basel IRB | VaR | Analyst: {st.session_state.user}</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 # ============================================================
 # TABS
@@ -373,8 +408,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "FAQs & PDF"
 ])
 
+
 # ============================================================
-# TAB 1
+# TAB 1: CUSTOMER PROFILE
 # ============================================================
 
 with tab1:
@@ -470,19 +506,21 @@ with tab1:
         st.session_state.reasons = output["reasons"]
         st.session_state.recommendations = output["recommendations"]
 
+        r = st.session_state.result
+
         portfolio_row = {
             "Customer": st.session_state.user,
-            "PD": st.session_state.result["adjusted_pd"],
-            "Lifetime PD": st.session_state.result["lifetime_pd"],
+            "PD": r.get("adjusted_pd", 0),
+            "Lifetime PD": r.get("lifetime_pd", r.get("adjusted_pd", 0)),
             "LGD": LGD_DEFAULT,
-            "EAD": st.session_state.result["ead"],
-            "ECL": st.session_state.result["ecl"],
-            "Stage": st.session_state.result["stage"],
-            "Standardised RWA": st.session_state.result["standardised_rwa"],
-            "Standardised CAR": st.session_state.result["standardised_car"],
-            "IRB RWA": st.session_state.result["irb_rwa"],
-            "IRB CAR": st.session_state.result["irb_car"],
-            "Decision": st.session_state.result["decision"]
+            "EAD": r.get("ead", 0),
+            "ECL": r.get("ecl", 0),
+            "Stage": r.get("stage", "NA"),
+            "Standardised RWA": r.get("standardised_rwa", 0),
+            "Standardised CAR": r.get("standardised_car", 0),
+            "IRB RWA": r.get("irb_rwa", 0),
+            "IRB CAR": r.get("irb_car", 0),
+            "Decision": r.get("decision", "NA")
         }
 
         st.session_state.portfolio_df = st.session_state.portfolio_df[
@@ -496,14 +534,12 @@ with tab1:
 
         st.success("Assessment completed. Open the Decision Dashboard tab.")
 
-if st.session_state.input_data is not None:
-    output = agent.run(st.session_state.input_data)
-    st.session_state.result = output["result"]
-    st.session_state.reasons = output["reasons"]
-    st.session_state.recommendations = output["recommendations"]
+
+run_current_assessment()
+
 
 # ============================================================
-# TAB 2
+# TAB 2: BUREAU DATA
 # ============================================================
 
 with tab2:
@@ -612,8 +648,9 @@ This module captures user-entered bureau-style data using structured dropdowns a
     c3.metric("Total Overdue", rupee(total_overdue))
     c4.metric("Overall Utilisation", f"{overall_util:.2f}%")
 
+
 # ============================================================
-# TAB 3
+# TAB 3: DECISION DASHBOARD
 # ============================================================
 
 with tab3:
@@ -622,17 +659,20 @@ with tab3:
     else:
         r = st.session_state.result
 
+        adjusted_pd = r.get("adjusted_pd", 0)
+        lifetime_pd = r.get("lifetime_pd", adjusted_pd)
+
         st.markdown("## Decision Dashboard")
 
         d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Adjusted PD", f"{r['adjusted_pd']:.2%}")
-        d2.metric("Lifetime PD", f"{r['lifetime_pd']:.2%}")
-        d3.metric("AI Credit Score", r["score"])
-        d4.metric("Decision", r["decision"])
+        d1.metric("Adjusted PD", f"{adjusted_pd:.2%}")
+        d2.metric("Lifetime PD", f"{lifetime_pd:.2%}")
+        d3.metric("AI Credit Score", r.get("score", 0))
+        d4.metric("Decision", r.get("decision", "NA"))
 
-        if r["decision"] == "Approve":
+        if r.get("decision") == "Approve":
             st.markdown('<div class="low">APPROVED: Customer satisfies risk, affordability, and capital criteria.</div>', unsafe_allow_html=True)
-        elif r["decision"] == "Manual Review":
+        elif r.get("decision") == "Manual Review":
             st.markdown('<div class="medium">MANUAL REVIEW: Profile requires analyst review.</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="high">REJECTED: Customer fails one or more underwriting or risk rules.</div>', unsafe_allow_html=True)
@@ -640,29 +680,29 @@ with tab3:
         st.markdown("## Underwriting Summary")
 
         u1, u2, u3, u4 = st.columns(4)
-        u1.metric("FOIR", f"{r['foir']:.2f}%")
-        u2.metric("New EMI", rupee(r["new_emi"]))
-        u3.metric("Credit Utilisation", f"{r['utilisation']:.2f}%")
-        u4.metric("Eligible Loan by Multiplier", rupee(r["eligible_loan_multiplier"]))
+        u1.metric("FOIR", f"{r.get('foir', 0):.2f}%")
+        u2.metric("New EMI", rupee(r.get("new_emi", 0)))
+        u3.metric("Credit Utilisation", f"{r.get('utilisation', 0):.2f}%")
+        u4.metric("Eligible Loan by Multiplier", rupee(r.get("eligible_loan_multiplier", 0)))
 
-        st.markdown(f"**Decision Reason:** {r['decision_reason']}")
+        st.markdown(f"**Decision Reason:** {r.get('decision_reason', 'NA')}")
 
         st.markdown("## Three-Layer Model Intelligence")
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("QSVC Signal", "High Risk" if r["qsvc_signal"] == 1 else "Normal")
-        m2.metric("LightGBM Probability", f"{r['lgb_probability']:.2%}")
-        m3.metric("Calibrated PD", f"{r['base_pd']:.2%}")
+        m1.metric("QSVC Signal", "High Risk" if r.get("qsvc_signal", 0) == 1 else "Normal")
+        m2.metric("LightGBM Probability", f"{r.get('lgb_probability', 0):.2%}")
+        m3.metric("Calibrated PD", f"{r.get('base_pd', 0):.2%}")
 
         g1, g2 = st.columns(2)
 
         with g1:
-            st.pyplot(create_score_gauge(r["score"]))
-            st.write(f"Score Band: **{r['score_band']}**")
+            st.pyplot(create_score_gauge(r.get("score", 300)))
+            st.write(f"Score Band: **{r.get('score_band', 'NA')}**")
 
         with g2:
-            st.pyplot(create_risk_meter(r["adjusted_pd"]))
-            st.write(f"Risk Band: **{r['risk_band']}**")
+            st.pyplot(create_risk_meter(adjusted_pd))
+            st.write(f"Risk Band: **{r.get('risk_band', 'NA')}**")
 
         st.markdown("## Agent Reasoning")
         for item in st.session_state.reasons:
@@ -672,8 +712,9 @@ with tab3:
         for item in st.session_state.recommendations:
             st.write("•", item)
 
+
 # ============================================================
-# TAB 4
+# TAB 4: RISK ANALYSIS
 # ============================================================
 
 with tab4:
@@ -693,32 +734,37 @@ with tab4:
             "PAY_AMT1": "Payment Made"
         }
 
-        shap_values = explainer.shap_values(r["scaled"])
+        try:
+            shap_values = explainer.shap_values(r["scaled"])
 
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1]
 
-        shap_df = pd.DataFrame({
-            "Feature": feature_columns,
-            "Impact": shap_values[0]
-        })
+            shap_df = pd.DataFrame({
+                "Feature": feature_columns,
+                "Impact": shap_values[0]
+            })
 
-        shap_df["Feature"] = shap_df["Feature"].map(lambda x: feature_name_map.get(x, x))
-        shap_df["Direction"] = np.where(shap_df["Impact"] >= 0, "Increases risk", "Reduces risk")
-        shap_df = shap_df.sort_values(by="Impact", key=np.abs, ascending=False).head(8)
+            shap_df["Feature"] = shap_df["Feature"].map(lambda x: feature_name_map.get(x, x))
+            shap_df["Direction"] = np.where(shap_df["Impact"] >= 0, "Increases risk", "Reduces risk")
+            shap_df = shap_df.sort_values(by="Impact", key=np.abs, ascending=False).head(8)
 
-        st.dataframe(shap_df, use_container_width=True)
+            st.dataframe(shap_df, use_container_width=True)
 
-        fig, ax = plt.subplots(figsize=(9, 4.5))
-        ax.barh(shap_df["Feature"], shap_df["Impact"])
-        ax.axvline(0)
-        ax.set_xlabel("SHAP Impact on Default Risk")
-        ax.set_title("Top Risk Drivers")
-        ax.invert_yaxis()
-        st.pyplot(fig)
+            fig, ax = plt.subplots(figsize=(9, 4.5))
+            ax.barh(shap_df["Feature"], shap_df["Impact"])
+            ax.axvline(0)
+            ax.set_xlabel("SHAP Impact on Default Risk")
+            ax.set_title("Top Risk Drivers")
+            ax.invert_yaxis()
+            st.pyplot(fig)
+
+        except Exception as e:
+            st.warning("SHAP graph could not be generated for the current model output.")
+
 
 # ============================================================
-# TAB 5
+# TAB 5: SIMULATOR
 # ============================================================
 
 with tab5:
@@ -761,10 +807,10 @@ with tab5:
         sim_result = sim_output["result"]
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current FOIR", f"{r['foir']:.2f}%")
-        c2.metric("Simulated FOIR", f"{sim_result['foir']:.2f}%", delta=f"{sim_result['foir'] - r['foir']:.2f}%")
-        c3.metric("Simulated PD", f"{sim_result['adjusted_pd']:.2%}", delta=f"{sim_result['adjusted_pd'] - r['adjusted_pd']:.2%}")
-        c4.metric("Simulated Decision", sim_result["decision"])
+        c1.metric("Current FOIR", f"{r.get('foir', 0):.2f}%")
+        c2.metric("Simulated FOIR", f"{sim_result.get('foir', 0):.2f}%", delta=f"{sim_result.get('foir', 0) - r.get('foir', 0):.2f}%")
+        c3.metric("Simulated PD", f"{sim_result.get('adjusted_pd', 0):.2%}", delta=f"{sim_result.get('adjusted_pd', 0) - r.get('adjusted_pd', 0):.2%}")
+        c4.metric("Simulated Decision", sim_result.get("decision", "NA"))
 
         st.markdown("## Auto-Approval Optimizer")
 
@@ -777,10 +823,10 @@ with tab5:
             opt_scenario = opt["scenario"]
 
             o1, o2, o3, o4 = st.columns(4)
-            o1.metric("Optimized PD", f"{opt_result['adjusted_pd']:.2%}")
-            o2.metric("Optimized FOIR", f"{opt_result['foir']:.2f}%")
-            o3.metric("Optimized Score", opt_result["score"])
-            o4.metric("Optimized Decision", opt_result["decision"])
+            o1.metric("Optimized PD", f"{opt_result.get('adjusted_pd', 0):.2%}")
+            o2.metric("Optimized FOIR", f"{opt_result.get('foir', 0):.2f}%")
+            o3.metric("Optimized Score", opt_result.get("score", 0))
+            o4.metric("Optimized Decision", opt_result.get("decision", "NA"))
 
             st.markdown("### Recommended Changes")
             st.write(f"- Requested Loan Amount: {rupee(d['REQUESTED_LOAN_AMOUNT'])} -> {rupee(opt_scenario['REQUESTED_LOAN_AMOUNT'])}")
@@ -788,8 +834,9 @@ with tab5:
             st.write(f"- Card Payment: {rupee(d['PAY_AMT1'])} -> {rupee(opt_scenario['PAY_AMT1'])}")
             st.write("- Repayment behaviour: Paid on time")
 
+
 # ============================================================
-# TAB 6
+# TAB 6: IFRS 9 & BASEL
 # ============================================================
 
 with tab6:
@@ -798,43 +845,73 @@ with tab6:
     else:
         r = st.session_state.result
 
+        adjusted_pd = r.get("adjusted_pd", 0)
+        lifetime_pd = r.get("lifetime_pd", adjusted_pd)
+
         st.markdown("## IFRS 9 ECL, Stage Migration, PD Term Structure and Basel Capital")
 
         b1, b2, b3, b4 = st.columns(4)
-        b1.metric("IFRS 9 Stage", r["stage"])
-        b2.metric("ECL Type", r["ecl_type"])
-        b3.metric("ECL", rupee(r["ecl"]))
-        b4.metric("Lifetime PD", f"{r['lifetime_pd']:.2%}")
+        b1.metric("IFRS 9 Stage", r.get("stage", "NA"))
+        b2.metric("ECL Type", r.get("ecl_type", "NA"))
+        b3.metric("ECL", rupee(r.get("ecl", 0)))
+        b4.metric("Lifetime PD", f"{lifetime_pd:.2%}")
 
-        st.markdown("### PD Term Structure")
-        pd_term_display = r["pd_term_df"].copy()
-        pd_term_display["Marginal PD"] = pd_term_display["Marginal PD"].map(lambda x: f"{x:.2%}")
-        pd_term_display["Cumulative PD"] = pd_term_display["Cumulative PD"].map(lambda x: f"{x:.2%}")
-        st.dataframe(pd_term_display, use_container_width=True)
+        st.markdown("### PD Term Structure and Survival Curve")
+
+        pd_term_display = r.get("pd_term_df", pd.DataFrame()).copy()
+
+        if not pd_term_display.empty:
+            chart_df = pd_term_display.copy()
+
+            display_df = pd_term_display.copy()
+            if "Marginal PD" in display_df:
+                display_df["Marginal PD"] = display_df["Marginal PD"].map(lambda x: f"{x:.2%}")
+            if "Cumulative PD" in display_df:
+                display_df["Cumulative PD"] = display_df["Cumulative PD"].map(lambda x: f"{x:.2%}")
+            if "Survival Probability" in display_df:
+                display_df["Survival Probability"] = display_df["Survival Probability"].map(lambda x: f"{x:.2%}")
+
+            st.dataframe(display_df, use_container_width=True)
+
+            if "Survival Probability" in chart_df.columns:
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.plot(chart_df["Year"], chart_df["Cumulative PD"], marker="o", label="Cumulative PD")
+                ax.plot(chart_df["Year"], chart_df["Survival Probability"], marker="o", label="Survival Probability")
+                ax.set_xlabel("Year")
+                ax.set_ylabel("Probability")
+                ax.set_title("Multi-year PD and Survival Curve")
+                ax.legend()
+                st.pyplot(fig)
+        else:
+            st.warning("PD term structure is not available. Please update tools.py.")
 
         st.markdown("### Stage Migration Matrix")
-        st.dataframe(r["transition_matrix"], use_container_width=True)
-        st.info(f"Current exposure belongs to: {r['current_stage_row']}")
+        transition_matrix = r.get("transition_matrix", pd.DataFrame())
+        if not transition_matrix.empty:
+            st.dataframe(transition_matrix, use_container_width=True)
+            st.info(f"Current exposure belongs to: {r.get('current_stage_row', 'NA')}")
+        else:
+            st.warning("Transition matrix is not available. Please update tools.py.")
 
         st.markdown("### Basel Capital Metrics")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("EAD", rupee(r["ead"]))
-        c2.metric("LGD", f"{r['lgd']:.0%}")
-        c3.metric("Standardised RWA", rupee(r["standardised_rwa"]))
-        c4.metric("Standardised CAR", f"{r['standardised_car']:.2f}%")
+        c1.metric("EAD", rupee(r.get("ead", 0)))
+        c2.metric("LGD", f"{r.get('lgd', LGD_DEFAULT):.0%}")
+        c3.metric("Standardised RWA", rupee(r.get("standardised_rwa", 0)))
+        c4.metric("Standardised CAR", f"{r.get('standardised_car', 0):.2f}%")
 
         i1, i2, i3, i4 = st.columns(4)
-        i1.metric("IRB Capital %", f"{r['irb_capital_requirement_pct']:.2%}")
-        i2.metric("IRB Capital Amount", rupee(r["irb_capital_amount"]))
-        i3.metric("IRB RWA", rupee(r["irb_rwa"]))
-        i4.metric("IRB CAR", f"{r['irb_car']:.2f}%")
+        i1.metric("IRB Capital %", f"{r.get('irb_capital_requirement_pct', 0):.2%}")
+        i2.metric("IRB Capital Amount", rupee(r.get("irb_capital_amount", 0)))
+        i3.metric("IRB RWA", rupee(r.get("irb_rwa", 0)))
+        i4.metric("IRB CAR", f"{r.get('irb_car', 0):.2f}%")
 
         j1, j2 = st.columns(2)
-        j1.metric("Asset Correlation", f"{r['asset_correlation']:.4f}")
-        j2.metric("Maturity Adjustment", f"{r['maturity_adjustment']:.4f}")
+        j1.metric("Asset Correlation", f"{r.get('asset_correlation', 0):.4f}")
+        j2.metric("Maturity Adjustment", f"{r.get('maturity_adjustment', 0):.4f}")
 
-        if r["standardised_car"] >= BASEL_CAR_THRESHOLD:
+        if r.get("standardised_car", 0) >= BASEL_CAR_THRESHOLD:
             st.success("Capital adequacy is above the simplified Basel threshold.")
         else:
             st.error("Capital adequacy is below the simplified Basel threshold and needs review.")
@@ -852,8 +929,9 @@ with tab6:
 
             st.bar_chart(p["Stage"].value_counts())
 
+
 # ============================================================
-# TAB 7
+# TAB 7: STRESS & VAR
 # ============================================================
 
 with tab7:
@@ -869,7 +947,12 @@ with tab7:
             ["Base Case", "Mild Stress", "Recession", "Severe Recession", "High Interest Rate Shock"]
         )
 
-        stress = apply_stress_scenario(r["adjusted_pd"], LGD_DEFAULT, r["ead"], scenario)
+        stress = apply_stress_scenario(
+            r.get("adjusted_pd", 0),
+            LGD_DEFAULT,
+            r.get("ead", 0),
+            scenario
+        )
 
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("Stressed PD", f"{stress['Stressed PD']:.2%}")
@@ -881,7 +964,7 @@ with tab7:
 
         stress_rows = []
         for sc in ["Base Case", "Mild Stress", "Recession", "Severe Recession", "High Interest Rate Shock"]:
-            sr = apply_stress_scenario(r["adjusted_pd"], LGD_DEFAULT, r["ead"], sc)
+            sr = apply_stress_scenario(r.get("adjusted_pd", 0), LGD_DEFAULT, r.get("ead", 0), sc)
             stress_rows.append({
                 "Scenario": sr["Scenario"],
                 "PD": f"{sr['Stressed PD']:.2%}",
@@ -897,7 +980,13 @@ with tab7:
         confidence_level = st.selectbox("Confidence Level", [0.95, 0.975, 0.99], index=2)
         n_sim = st.slider("Monte Carlo Simulations", 1000, 50000, 10000, step=1000)
 
-        var_result = simulate_credit_losses(r["adjusted_pd"], LGD_DEFAULT, r["ead"], n_sim, confidence_level)
+        var_result = simulate_credit_losses(
+            r.get("adjusted_pd", 0),
+            LGD_DEFAULT,
+            r.get("ead", 0),
+            n_sim,
+            confidence_level
+        )
 
         v1, v2, v3 = st.columns(3)
         v1.metric("Expected Loss", rupee(var_result["expected_loss"]))
@@ -914,8 +1003,41 @@ with tab7:
         ax.legend()
         st.pyplot(fig)
 
+        st.markdown("## Correlated Portfolio VaR")
+
+        if simulate_correlated_portfolio_var is None:
+            st.warning("Correlated portfolio VaR function is not available. Please update tools.py.")
+        else:
+            asset_corr = st.slider("Portfolio Asset Correlation", 0.01, 0.60, 0.20, step=0.01)
+
+            portfolio_var = simulate_correlated_portfolio_var(
+                st.session_state.portfolio_df,
+                asset_correlation=asset_corr,
+                n_simulations=n_sim,
+                confidence_level=confidence_level
+            )
+
+            if portfolio_var is None:
+                st.warning("Portfolio data is not available or missing PD/LGD/EAD columns.")
+            else:
+                pv1, pv2, pv3 = st.columns(3)
+                pv1.metric("Portfolio Expected Loss", rupee(portfolio_var["expected_loss"]))
+                pv2.metric(f"Portfolio VaR {confidence_level:.1%}", rupee(portfolio_var["var_loss"]))
+                pv3.metric("Portfolio Economic Capital", rupee(portfolio_var["economic_capital"]))
+
+                fig2, ax2 = plt.subplots(figsize=(9, 4))
+                ax2.hist(portfolio_var["losses"], bins=30)
+                ax2.axvline(portfolio_var["expected_loss"], linestyle="--", label="Portfolio Expected Loss")
+                ax2.axvline(portfolio_var["var_loss"], linestyle="--", label="Portfolio VaR")
+                ax2.set_title("Correlated Portfolio Credit Loss Distribution")
+                ax2.set_xlabel("Portfolio Loss")
+                ax2.set_ylabel("Frequency")
+                ax2.legend()
+                st.pyplot(fig2)
+
+
 # ============================================================
-# TAB 8
+# TAB 8: CIBIL REPORT
 # ============================================================
 
 with tab8:
@@ -927,10 +1049,10 @@ with tab8:
         st.markdown("## Credit Bureau Report - User-entered CIBIL-style Data")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Credit Score", r["score"])
-        c2.metric("Risk Band", r["risk_band"])
-        c3.metric("Decision", r["decision"])
-        c4.metric("FOIR", f"{r['foir']:.2f}%")
+        c1.metric("Credit Score", r.get("score", 0))
+        c2.metric("Risk Band", r.get("risk_band", "NA"))
+        c3.metric("Decision", r.get("decision", "NA"))
+        c4.metric("FOIR", f"{r.get('foir', 0):.2f}%")
 
         st.markdown("### Credit Accounts")
         st.dataframe(st.session_state.accounts_df, use_container_width=True)
@@ -950,8 +1072,9 @@ with tab8:
         })
         st.dataframe(summary_df, use_container_width=True)
 
+
 # ============================================================
-# TAB 9
+# TAB 9: FAQS & PDF
 # ============================================================
 
 with tab9:
@@ -1025,39 +1148,41 @@ No. Real CIBIL data requires licensed bureau APIs. This app uses structured user
 
             section("1. Risk Summary")
             table_rows([
-                ("Adjusted PD", f"{r['adjusted_pd']:.2%}"),
-                ("Lifetime PD", f"{r['lifetime_pd']:.2%}"),
-                ("Score", r["score"]),
-                ("Decision", r["decision"]),
-                ("Decision Reason", r["decision_reason"]),
-                ("FOIR", f"{r['foir']:.2f}%"),
-                ("Utilisation", f"{r['utilisation']:.2f}%")
+                ("Adjusted PD", f"{r.get('adjusted_pd', 0):.2%}"),
+                ("Lifetime PD", f"{r.get('lifetime_pd', r.get('adjusted_pd', 0)):.2%}"),
+                ("Score", r.get("score", 0)),
+                ("Decision", r.get("decision", "NA")),
+                ("Decision Reason", r.get("decision_reason", "NA")),
+                ("FOIR", f"{r.get('foir', 0):.2f}%"),
+                ("Utilisation", f"{r.get('utilisation', 0):.2f}%")
             ])
 
             section("2. IFRS 9 ECL")
             table_rows([
-                ("Stage", r["stage"]),
-                ("ECL Type", r["ecl_type"]),
-                ("EAD", rupee(r["ead"])),
-                ("LGD", f"{r['lgd']:.0%}"),
-                ("ECL", rupee(r["ecl"]))
+                ("Stage", r.get("stage", "NA")),
+                ("ECL Type", r.get("ecl_type", "NA")),
+                ("EAD", rupee(r.get("ead", 0))),
+                ("LGD", f"{r.get('lgd', LGD_DEFAULT):.0%}"),
+                ("ECL", rupee(r.get("ecl", 0)))
             ])
 
             section("3. Basel Capital")
             table_rows([
-                ("Standardised RWA", rupee(r["standardised_rwa"])),
-                ("Risk Weight", f"{r['risk_weight']:.0%}"),
-                ("Standardised CAR", f"{r['standardised_car']:.2f}%"),
-                ("IRB Capital %", f"{r['irb_capital_requirement_pct']:.2%}"),
-                ("IRB Capital Amount", rupee(r["irb_capital_amount"])),
-                ("IRB RWA", rupee(r["irb_rwa"])),
-                ("IRB CAR", f"{r['irb_car']:.2f}%")
+                ("Standardised RWA", rupee(r.get("standardised_rwa", 0))),
+                ("Risk Weight", f"{r.get('risk_weight', 0):.0%}"),
+                ("Standardised CAR", f"{r.get('standardised_car', 0):.2f}%"),
+                ("IRB Capital %", f"{r.get('irb_capital_requirement_pct', 0):.2%}"),
+                ("IRB Capital Amount", rupee(r.get("irb_capital_amount", 0))),
+                ("IRB RWA", rupee(r.get("irb_rwa", 0))),
+                ("IRB CAR", f"{r.get('irb_car', 0):.2f}%"),
+                ("Asset Correlation", f"{r.get('asset_correlation', 0):.4f}"),
+                ("Maturity Adjustment", f"{r.get('maturity_adjustment', 0):.4f}")
             ])
 
             section("4. VaR and Economic Capital")
             table_rows([
-                ("VaR 99%", rupee(r["var_99"])),
-                ("Economic Capital", rupee(r["economic_capital"]))
+                ("VaR 99%", rupee(r.get("var_99", 0))),
+                ("Economic Capital", rupee(r.get("economic_capital", 0)))
             ])
 
             section("5. Credit Accounts")

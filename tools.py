@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
-from math import log, sqrt
-from statistics import NormalDist
+from scipy.stats import norm
 
 LGD_DEFAULT = 0.45
 BASEL_CAR_THRESHOLD = 10.5
@@ -84,18 +83,20 @@ def classify_stage(pd_value, days_past_due):
 
 def generate_pd_term_structure(pd_12m, years=5):
     rows = []
-    pd_12m = min(max(pd_12m, 0.0001), 0.95)
+    survival = 1.0
 
-    cumulative_pd = 0
+    pd_12m = min(max(pd_12m, 0.0001), 0.95)
 
     for year in range(1, years + 1):
         marginal_pd = min(pd_12m * (1 + 0.15 * (year - 1)), 0.95)
-        cumulative_pd = 1 - ((1 - cumulative_pd) * (1 - marginal_pd))
+        survival *= (1 - marginal_pd)
+        cumulative_pd = 1 - survival
 
         rows.append({
             "Year": year,
             "Marginal PD": marginal_pd,
-            "Cumulative PD": cumulative_pd
+            "Cumulative PD": cumulative_pd,
+            "Survival Probability": survival
         })
 
     return pd.DataFrame(rows)
@@ -103,19 +104,16 @@ def generate_pd_term_structure(pd_12m, years=5):
 
 def compute_ecl(pd_value, lgd, ead, stage, pd_term_df=None):
     if "Stage 1" in stage:
-        # 12-month ECL
         return pd_value * lgd * ead, "12-month ECL"
 
     if "Stage 2" in stage:
-        # Lifetime ECL using cumulative 5-year PD
-        if pd_term_df is None or pd_term_df.empty:
-            lifetime_pd = min(pd_value * 3, 0.95)
-        else:
-            lifetime_pd = float(pd_term_df["Cumulative PD"].iloc[-1])
-
+        lifetime_pd = (
+            float(pd_term_df["Cumulative PD"].iloc[-1])
+            if pd_term_df is not None and not pd_term_df.empty
+            else min(pd_value * 3, 0.95)
+        )
         return lifetime_pd * lgd * ead, "Lifetime ECL"
 
-    # Stage 3 default exposure
     return pd_value * lgd * ead, "Lifetime ECL - Default"
 
 
@@ -131,9 +129,9 @@ def get_risk_weight(pd_value):
     return 1.50
 
 
-def compute_rwa(ead, pd_value):
-    risk_weight = get_risk_weight(pd_value)
-    return ead * risk_weight, risk_weight
+def compute_standardised_rwa(ead, pd_value):
+    rw = get_risk_weight(pd_value)
+    return ead * rw, rw
 
 
 def compute_car(capital, rwa):
@@ -142,63 +140,77 @@ def compute_car(capital, rwa):
     return (capital / rwa) * 100
 
 
-def basel_irb_capital(pd_value, lgd, ead, maturity_years=MATURITY_YEARS_DEFAULT):
+def basel_irb_corporate(pd_value, lgd, ead, maturity_years=2.5):
     """
-    Simplified Basel IRB corporate-style capital approximation.
-    Used for academic demonstration, not regulatory reporting.
+    Basel II/III corporate IRB capital formula.
+
+    K = [LGD * N((1/sqrt(1-R))*G(PD) + sqrt(R/(1-R))*G(0.999)) - PD*LGD]
+        * maturity adjustment
+
+    RWA = K * 12.5 * EAD
     """
 
     pd_value = min(max(pd_value, 0.0003), 0.999)
     lgd = min(max(lgd, 0.01), 0.95)
+    maturity_years = min(max(maturity_years, 1.0), 5.0)
 
-    n = NormalDist()
-
-    # Basel-style asset correlation approximation
-    correlation = (
-        0.12 * (1 - np.exp(-50 * pd_value)) / (1 - np.exp(-50))
-        + 0.24 * (1 - (1 - np.exp(-50 * pd_value)) / (1 - np.exp(-50)))
+    r = (
+        0.12 * ((1 - np.exp(-50 * pd_value)) / (1 - np.exp(-50)))
+        + 0.24 * (1 - ((1 - np.exp(-50 * pd_value)) / (1 - np.exp(-50))))
     )
 
-    maturity_adjustment_b = (0.11852 - 0.05478 * log(pd_value)) ** 2
-    maturity_adjustment = (1 + (maturity_years - 2.5) * maturity_adjustment_b) / (
-        1 - 1.5 * maturity_adjustment_b
-    )
+    b = (0.11852 - 0.05478 * np.log(pd_value)) ** 2
 
-    capital_requirement = lgd * (
-        n.cdf(
-            (1 / sqrt(1 - correlation)) * n.inv_cdf(pd_value)
-            + sqrt(correlation / (1 - correlation)) * n.inv_cdf(0.999)
+    maturity_adjustment = (1 + (maturity_years - 2.5) * b) / (1 - 1.5 * b)
+
+    g_pd = norm.ppf(pd_value)
+    g_999 = norm.ppf(0.999)
+
+    capital_requirement = (
+        lgd * norm.cdf(
+            (1 / np.sqrt(1 - r)) * g_pd
+            + np.sqrt(r / (1 - r)) * g_999
         )
-    ) - (pd_value * lgd)
+        - pd_value * lgd
+    )
 
     capital_requirement = max(capital_requirement * maturity_adjustment, 0)
+
     irb_capital = capital_requirement * ead
-    irb_rwa = irb_capital * 12.5
+    irb_rwa = capital_requirement * 12.5 * ead
 
     return {
         "IRB Capital Requirement %": capital_requirement,
         "IRB Capital Amount": irb_capital,
         "IRB RWA": irb_rwa,
-        "Asset Correlation": correlation,
+        "Asset Correlation": r,
         "Maturity Adjustment": maturity_adjustment
     }
 
 
-def transition_matrix(stage):
-    matrix = pd.DataFrame({
-        "To Stage 1": [0.88, 0.18, 0.02],
-        "To Stage 2": [0.10, 0.68, 0.13],
-        "To Stage 3": [0.02, 0.14, 0.85]
-    }, index=["From Stage 1", "From Stage 2", "From Stage 3"])
+def cohort_transition_matrix(current_stage):
+    """
+    Cohort-level stage migration matrix.
+    Rows represent origin stage, columns represent destination stage.
+    """
 
-    if "Stage 1" in stage:
-        current = "From Stage 1"
-    elif "Stage 2" in stage:
-        current = "From Stage 2"
+    matrix = pd.DataFrame(
+        {
+            "To Stage 1": [0.88, 0.20, 0.05],
+            "To Stage 2": [0.10, 0.65, 0.15],
+            "To Stage 3": [0.02, 0.15, 0.80],
+        },
+        index=["From Stage 1", "From Stage 2", "From Stage 3"]
+    )
+
+    if "Stage 1" in current_stage:
+        current_row = "From Stage 1"
+    elif "Stage 2" in current_stage:
+        current_row = "From Stage 2"
     else:
-        current = "From Stage 3"
+        current_row = "From Stage 3"
 
-    return matrix, current
+    return matrix, current_row
 
 
 def apply_financial_adjustment(pd_value, savings, mutual_funds, stocks, property_status, vehicle_status):
@@ -251,7 +263,7 @@ def final_decision_engine(pd_value, qsvc_signal, foir, utilisation, stage, car):
     return "Approve", "Meets risk, affordability, and capital criteria"
 
 
-def simulate_credit_losses(pd_value, lgd, ead, n_simulations=10000, confidence_level=0.99):
+def simulate_single_credit_losses(pd_value, lgd, ead, n_simulations=10000, confidence_level=0.99):
     pd_value = min(max(pd_value, 0.0001), 0.9999)
 
     losses = np.random.binomial(
@@ -270,6 +282,50 @@ def simulate_credit_losses(pd_value, lgd, ead, n_simulations=10000, confidence_l
         "var_loss": var_loss,
         "economic_capital": economic_capital,
         "confidence_level": confidence_level
+    }
+
+
+def simulate_correlated_portfolio_var(portfolio_df, asset_correlation=0.20, n_simulations=10000, confidence_level=0.99):
+    """
+    One-factor Gaussian copula / Vasicek-style correlated default simulation.
+    """
+
+    if portfolio_df is None or portfolio_df.empty:
+        return None
+
+    required = {"PD", "LGD", "EAD"}
+    if not required.issubset(portfolio_df.columns):
+        return None
+
+    pds = portfolio_df["PD"].astype(float).clip(0.0001, 0.9999).values
+    lgds = portfolio_df["LGD"].astype(float).values
+    eads = portfolio_df["EAD"].astype(float).values
+
+    thresholds = norm.ppf(pds)
+
+    systemic_factor = np.random.normal(size=n_simulations)
+    idiosyncratic = np.random.normal(size=(n_simulations, len(pds)))
+
+    latent = (
+        np.sqrt(asset_correlation) * systemic_factor[:, None]
+        + np.sqrt(1 - asset_correlation) * idiosyncratic
+    )
+
+    defaults = latent < thresholds
+    losses = defaults * lgds * eads
+    total_losses = losses.sum(axis=1)
+
+    expected_loss = np.mean(total_losses)
+    var_loss = np.percentile(total_losses, confidence_level * 100)
+    economic_capital = var_loss - expected_loss
+
+    return {
+        "losses": total_losses,
+        "expected_loss": expected_loss,
+        "var_loss": var_loss,
+        "economic_capital": economic_capital,
+        "confidence_level": confidence_level,
+        "asset_correlation": asset_correlation
     }
 
 
@@ -356,21 +412,29 @@ def run_credit_assessment(data, model, calibrator, scaler, feature_columns, qsvc
     )
 
     ead = data["REQUESTED_LOAN_AMOUNT"]
+    maturity_years = min(max(data.get("TENURE", 3), 1), 5)
+
     stage = classify_stage(adjusted_pd, data["DPD"])
 
     pd_term_df = generate_pd_term_structure(adjusted_pd, years=5)
     lifetime_pd = float(pd_term_df["Cumulative PD"].iloc[-1])
 
-    ecl, ecl_type = compute_ecl(adjusted_pd, LGD_DEFAULT, ead, stage, pd_term_df)
-
-    standardised_rwa, risk_weight = compute_rwa(ead, adjusted_pd)
-    standardised_car = compute_car(data["CAPITAL"], standardised_rwa)
-
-    irb = basel_irb_capital(
+    ecl, ecl_type = compute_ecl(
         adjusted_pd,
         LGD_DEFAULT,
         ead,
-        maturity_years=MATURITY_YEARS_DEFAULT
+        stage,
+        pd_term_df
+    )
+
+    standardised_rwa, risk_weight = compute_standardised_rwa(ead, adjusted_pd)
+    standardised_car = compute_car(data["CAPITAL"], standardised_rwa)
+
+    irb = basel_irb_corporate(
+        adjusted_pd,
+        LGD_DEFAULT,
+        ead,
+        maturity_years=maturity_years
     )
 
     irb_car = compute_car(data["CAPITAL"], irb["IRB RWA"])
@@ -389,9 +453,9 @@ def run_credit_assessment(data, model, calibrator, scaler, feature_columns, qsvc
     eligible_loan_multiplier = data["MONTHLY_INCOME"] * 15
     max_new_emi_40_rule = max((data["MONTHLY_INCOME"] * 0.40) - data["EXISTING_EMI"], 0)
 
-    var_result = simulate_credit_losses(adjusted_pd, LGD_DEFAULT, ead, 10000, 0.99)
+    var_result = simulate_single_credit_losses(adjusted_pd, LGD_DEFAULT, ead, 10000, 0.99)
 
-    matrix, current_stage_row = transition_matrix(stage)
+    matrix, current_stage_row = cohort_transition_matrix(stage)
 
     return {
         "input_df": input_df,

@@ -19,11 +19,8 @@ class CreditRiskAgent:
             qsvc_model=self.qsvc_model
         )
 
-        reasons = generate_reasons(data, result)
-        recommendations = generate_recommendations(data, result)
-
         return {
             "result": result,
-            "reasons": reasons,
-            "recommendations": recommendations
+            "reasons": generate_reasons(data, result),
+            "recommendations": generate_recommendations(data, result)
         }
