@@ -3,9 +3,9 @@ pandas
 numpy
 scikit-learn
 lightgbm
+joblib
 matplotlib
 shap
-joblib
 fpdf
-qiskit
 qiskit-machine-learning
+qiskit
