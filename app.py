@@ -20,19 +20,11 @@ from tools import (
     LGD_DEFAULT
 )
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
 st.set_page_config(
     page_title="AI Credit Risk System",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# ============================================================
-# STYLE
-# ============================================================
 
 st.markdown("""
 <style>
@@ -61,7 +53,7 @@ html, body, [class*="css"] {font-family: "Segoe UI", sans-serif;}
 """, unsafe_allow_html=True)
 
 # ============================================================
-# SESSION
+# SESSION STATE
 # ============================================================
 
 if "users" not in st.session_state:
@@ -104,7 +96,8 @@ if "payment_df" not in st.session_state:
 
 if "portfolio_df" not in st.session_state:
     st.session_state.portfolio_df = pd.DataFrame(columns=[
-        "Customer", "PD", "LGD", "EAD", "ECL", "Stage", "RWA", "CAR", "Decision"
+        "Customer", "PD", "Lifetime PD", "LGD", "EAD", "ECL", "Stage",
+        "Standardised RWA", "Standardised CAR", "IRB RWA", "IRB CAR", "Decision"
     ])
 
 # ============================================================
@@ -208,7 +201,7 @@ repayment_map = {
 }
 
 # ============================================================
-# HELPERS
+# APP HELPERS
 # ============================================================
 
 def bureau_totals():
@@ -341,7 +334,8 @@ st.sidebar.write("Layer 1: QSVC - Best PR-AUC")
 st.sidebar.write("Layer 2: LightGBM - Best Accuracy")
 st.sidebar.write("Layer 3: Calibrated LightGBM - Final PD")
 st.sidebar.write("Underwriting: FOIR + EMI + Utilisation")
-st.sidebar.write("Basel: ECL + RWA + CAR")
+st.sidebar.write("IFRS 9: Stage + Lifetime ECL")
+st.sidebar.write("Basel: Standardised RWA + IRB RWA + CAR")
 st.sidebar.write("Advanced: VaR + Economic Capital")
 st.sidebar.write(f"QSVC: {'Available' if qsvc_available else 'Fallback Mode'}")
 
@@ -359,7 +353,7 @@ if st.sidebar.button("Logout"):
 st.markdown(f"""
 <div class="main-header">
     <h1>AI Credit Risk Decision System</h1>
-    <p>CIBIL-style bureau input | QSVC + LightGBM + Calibrated PD | FOIR | Basel ECL | RWA/CAR | VaR | Analyst: {st.session_state.user}</p>
+    <p>CIBIL-style bureau input | QSVC + LightGBM + Calibrated PD | IFRS 9 ECL | Basel IRB | VaR | Analyst: {st.session_state.user}</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -373,14 +367,14 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Decision Dashboard",
     "Risk Analysis",
     "Simulator",
-    "Basel & Capital",
+    "IFRS 9 & Basel",
     "Stress & VaR",
     "CIBIL Report",
     "FAQs & PDF"
 ])
 
 # ============================================================
-# TAB 1: CUSTOMER PROFILE
+# TAB 1
 # ============================================================
 
 with tab1:
@@ -389,7 +383,7 @@ with tab1:
     st.markdown("""
     <div class="card">
     <b>Input Guide</b><br>
-    This system uses calibrated PD, bureau data, FOIR, EMI affordability, credit utilisation, Basel ECL, capital adequacy, stress testing and VaR-based economic capital.
+    This system uses calibrated PD, bureau data, FOIR, EMI affordability, credit utilisation, IFRS 9 staging, lifetime ECL, Basel capital metrics, stress testing and VaR-based economic capital.
     </div>
     """, unsafe_allow_html=True)
 
@@ -479,12 +473,15 @@ with tab1:
         portfolio_row = {
             "Customer": st.session_state.user,
             "PD": st.session_state.result["adjusted_pd"],
+            "Lifetime PD": st.session_state.result["lifetime_pd"],
             "LGD": LGD_DEFAULT,
             "EAD": st.session_state.result["ead"],
             "ECL": st.session_state.result["ecl"],
             "Stage": st.session_state.result["stage"],
-            "RWA": st.session_state.result["rwa"],
-            "CAR": st.session_state.result["car"],
+            "Standardised RWA": st.session_state.result["standardised_rwa"],
+            "Standardised CAR": st.session_state.result["standardised_car"],
+            "IRB RWA": st.session_state.result["irb_rwa"],
+            "IRB CAR": st.session_state.result["irb_car"],
             "Decision": st.session_state.result["decision"]
         }
 
@@ -506,14 +503,14 @@ if st.session_state.input_data is not None:
     st.session_state.recommendations = output["recommendations"]
 
 # ============================================================
-# TAB 2: BUREAU DATA
+# TAB 2
 # ============================================================
 
 with tab2:
     st.markdown("## User-entered Credit Bureau Data")
 
     st.warning("""
-Real CIBIL/Experian data cannot be fetched without licensed bureau APIs. 
+Real CIBIL/Experian data cannot be fetched without licensed bureau APIs.
 This module captures user-entered bureau-style data using structured dropdowns and date fields.
 """)
 
@@ -563,6 +560,7 @@ This module captures user-entered bureau-style data using structured dropdowns a
         current_val = st.session_state.payment_df.loc[
             st.session_state.payment_df["Month"] == m, "Payment Status"
         ].iloc[0]
+
         status = st.selectbox(
             f"{m} Payment Status",
             status_options,
@@ -615,7 +613,7 @@ This module captures user-entered bureau-style data using structured dropdowns a
     c4.metric("Overall Utilisation", f"{overall_util:.2f}%")
 
 # ============================================================
-# TAB 3: DECISION DASHBOARD
+# TAB 3
 # ============================================================
 
 with tab3:
@@ -628,7 +626,7 @@ with tab3:
 
         d1, d2, d3, d4 = st.columns(4)
         d1.metric("Adjusted PD", f"{r['adjusted_pd']:.2%}")
-        d2.metric("FOIR", f"{r['foir']:.2f}%")
+        d2.metric("Lifetime PD", f"{r['lifetime_pd']:.2%}")
         d3.metric("AI Credit Score", r["score"])
         d4.metric("Decision", r["decision"])
 
@@ -642,8 +640,8 @@ with tab3:
         st.markdown("## Underwriting Summary")
 
         u1, u2, u3, u4 = st.columns(4)
-        u1.metric("New EMI", rupee(r["new_emi"]))
-        u2.metric("Max EMI by 40% Rule", rupee(r["max_new_emi_40_rule"]))
+        u1.metric("FOIR", f"{r['foir']:.2f}%")
+        u2.metric("New EMI", rupee(r["new_emi"]))
         u3.metric("Credit Utilisation", f"{r['utilisation']:.2f}%")
         u4.metric("Eligible Loan by Multiplier", rupee(r["eligible_loan_multiplier"]))
 
@@ -675,7 +673,7 @@ with tab3:
             st.write("•", item)
 
 # ============================================================
-# TAB 4: RISK ANALYSIS
+# TAB 4
 # ============================================================
 
 with tab4:
@@ -720,7 +718,7 @@ with tab4:
         st.pyplot(fig)
 
 # ============================================================
-# TAB 5: SIMULATOR
+# TAB 5
 # ============================================================
 
 with tab5:
@@ -791,7 +789,7 @@ with tab5:
             st.write("- Repayment behaviour: Paid on time")
 
 # ============================================================
-# TAB 6: BASEL & CAPITAL
+# TAB 6
 # ============================================================
 
 with tab6:
@@ -800,20 +798,43 @@ with tab6:
     else:
         r = st.session_state.result
 
-        st.markdown("## Basel ECL, Stage Classification and Capital Adequacy")
+        st.markdown("## IFRS 9 ECL, Stage Migration, PD Term Structure and Basel Capital")
 
         b1, b2, b3, b4 = st.columns(4)
         b1.metric("IFRS 9 Stage", r["stage"])
-        b2.metric("ECL", rupee(r["ecl"]))
-        b3.metric("RWA", rupee(r["rwa"]))
-        b4.metric("CAR", f"{r['car']:.2f}%")
+        b2.metric("ECL Type", r["ecl_type"])
+        b3.metric("ECL", rupee(r["ecl"]))
+        b4.metric("Lifetime PD", f"{r['lifetime_pd']:.2%}")
 
-        c1, c2, c3 = st.columns(3)
+        st.markdown("### PD Term Structure")
+        pd_term_display = r["pd_term_df"].copy()
+        pd_term_display["Marginal PD"] = pd_term_display["Marginal PD"].map(lambda x: f"{x:.2%}")
+        pd_term_display["Cumulative PD"] = pd_term_display["Cumulative PD"].map(lambda x: f"{x:.2%}")
+        st.dataframe(pd_term_display, use_container_width=True)
+
+        st.markdown("### Stage Migration Matrix")
+        st.dataframe(r["transition_matrix"], use_container_width=True)
+        st.info(f"Current exposure belongs to: {r['current_stage_row']}")
+
+        st.markdown("### Basel Capital Metrics")
+
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("EAD", rupee(r["ead"]))
         c2.metric("LGD", f"{r['lgd']:.0%}")
-        c3.metric("Risk Weight", f"{r['risk_weight']:.0%}")
+        c3.metric("Standardised RWA", rupee(r["standardised_rwa"]))
+        c4.metric("Standardised CAR", f"{r['standardised_car']:.2f}%")
 
-        if r["car"] >= BASEL_CAR_THRESHOLD:
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("IRB Capital %", f"{r['irb_capital_requirement_pct']:.2%}")
+        i2.metric("IRB Capital Amount", rupee(r["irb_capital_amount"]))
+        i3.metric("IRB RWA", rupee(r["irb_rwa"]))
+        i4.metric("IRB CAR", f"{r['irb_car']:.2f}%")
+
+        j1, j2 = st.columns(2)
+        j1.metric("Asset Correlation", f"{r['asset_correlation']:.4f}")
+        j2.metric("Maturity Adjustment", f"{r['maturity_adjustment']:.4f}")
+
+        if r["standardised_car"] >= BASEL_CAR_THRESHOLD:
             st.success("Capital adequacy is above the simplified Basel threshold.")
         else:
             st.error("Capital adequacy is below the simplified Basel threshold and needs review.")
@@ -826,13 +847,13 @@ with tab6:
             p1, p2, p3, p4 = st.columns(4)
             p1.metric("Total EAD", rupee(p["EAD"].sum()))
             p2.metric("Total ECL", rupee(p["ECL"].sum()))
-            p3.metric("Total RWA", rupee(p["RWA"].sum()))
+            p3.metric("Total Standardised RWA", rupee(p["Standardised RWA"].sum()))
             p4.metric("Average PD", f"{p['PD'].mean():.2%}")
 
             st.bar_chart(p["Stage"].value_counts())
 
 # ============================================================
-# TAB 7: STRESS & VAR
+# TAB 7
 # ============================================================
 
 with tab7:
@@ -894,7 +915,7 @@ with tab7:
         st.pyplot(fig)
 
 # ============================================================
-# TAB 8: CIBIL REPORT
+# TAB 8
 # ============================================================
 
 with tab8:
@@ -930,7 +951,7 @@ with tab8:
         st.dataframe(summary_df, use_container_width=True)
 
 # ============================================================
-# TAB 9: FAQS AND PDF
+# TAB 9
 # ============================================================
 
 with tab9:
@@ -938,22 +959,39 @@ with tab9:
 
     with st.expander("Are we fully Basel compliant?"):
         st.write("""
-This is a Basel-inspired academic prototype, not a regulatory implementation.
-It includes PD, LGD, EAD, ECL, IFRS 9 staging, RWA, CAR, stress testing and VaR.
+This is a Basel-inspired academic prototype, not a certified regulatory implementation.
+It includes PD, LGD, EAD, ECL, IFRS 9 staging, lifetime ECL, transition matrix, PD term structure, standardised RWA, simplified IRB capital, CAR, stress testing and VaR.
 It does not perform supervisory reporting or regulatory model validation.
 """)
 
-    with st.expander("What is Expected Credit Loss?"):
-        st.write("ECL = PD x LGD x EAD. It estimates expected loss from credit exposure.")
+    with st.expander("What is lifetime ECL?"):
+        st.write("""
+Lifetime ECL estimates expected loss over the remaining life of the exposure.
+In this prototype, Stage 2 and Stage 3 exposures use lifetime ECL, while Stage 1 uses 12-month ECL.
+""")
 
-    with st.expander("What is RWA and CAR?"):
-        st.write("RWA is risk-weighted assets. CAR = Capital / RWA. This app uses simplified PD-based risk weights.")
+    with st.expander("What is PD term structure?"):
+        st.write("""
+The PD term structure shows marginal and cumulative default probability over multiple future years.
+It supports lifetime ECL calculation for Stage 2 and Stage 3 exposures.
+""")
+
+    with st.expander("What is stage migration?"):
+        st.write("""
+Stage migration represents the probability that an exposure moves from Stage 1 to Stage 2 or Stage 3 over time.
+This prototype uses a simplified transition matrix for academic demonstration.
+""")
+
+    with st.expander("What is Basel IRB capital?"):
+        st.write("""
+Basel IRB capital links PD, LGD, EAD, asset correlation and maturity adjustment to estimate regulatory-style capital.
+This implementation is simplified and not valid for supervisory reporting.
+""")
 
     with st.expander("Is the CIBIL report real?"):
-        st.write("No. Real CIBIL data needs licensed bureau APIs. This app uses structured user-entered bureau-style data.")
-
-    with st.expander("What is Credit VaR?"):
-        st.write("Credit VaR estimates a high-loss threshold using Monte Carlo loss simulation.")
+        st.write("""
+No. Real CIBIL data requires licensed bureau APIs. This app uses structured user-entered bureau-style data.
+""")
 
     st.markdown("---")
 
@@ -988,6 +1026,7 @@ It does not perform supervisory reporting or regulatory model validation.
             section("1. Risk Summary")
             table_rows([
                 ("Adjusted PD", f"{r['adjusted_pd']:.2%}"),
+                ("Lifetime PD", f"{r['lifetime_pd']:.2%}"),
                 ("Score", r["score"]),
                 ("Decision", r["decision"]),
                 ("Decision Reason", r["decision_reason"]),
@@ -995,19 +1034,33 @@ It does not perform supervisory reporting or regulatory model validation.
                 ("Utilisation", f"{r['utilisation']:.2f}%")
             ])
 
-            section("2. Basel Metrics")
+            section("2. IFRS 9 ECL")
             table_rows([
                 ("Stage", r["stage"]),
+                ("ECL Type", r["ecl_type"]),
                 ("EAD", rupee(r["ead"])),
                 ("LGD", f"{r['lgd']:.0%}"),
-                ("ECL", rupee(r["ecl"])),
-                ("RWA", rupee(r["rwa"])),
-                ("CAR", f"{r['car']:.2f}%"),
+                ("ECL", rupee(r["ecl"]))
+            ])
+
+            section("3. Basel Capital")
+            table_rows([
+                ("Standardised RWA", rupee(r["standardised_rwa"])),
+                ("Risk Weight", f"{r['risk_weight']:.0%}"),
+                ("Standardised CAR", f"{r['standardised_car']:.2f}%"),
+                ("IRB Capital %", f"{r['irb_capital_requirement_pct']:.2%}"),
+                ("IRB Capital Amount", rupee(r["irb_capital_amount"])),
+                ("IRB RWA", rupee(r["irb_rwa"])),
+                ("IRB CAR", f"{r['irb_car']:.2f}%")
+            ])
+
+            section("4. VaR and Economic Capital")
+            table_rows([
                 ("VaR 99%", rupee(r["var_99"])),
                 ("Economic Capital", rupee(r["economic_capital"]))
             ])
 
-            section("3. Credit Accounts")
+            section("5. Credit Accounts")
             if st.session_state.accounts_df.empty:
                 pdf.multi_cell(0, 6, safe_text("No user-entered credit account data."))
             else:
@@ -1020,13 +1073,13 @@ It does not perform supervisory reporting or regulatory model validation.
                         f"Status: {row['Status']} | Utilisation: {row['Utilisation %']}%"
                     ))
 
-            section("4. Payment History")
+            section("6. Payment History")
             for _, row in st.session_state.payment_df.iterrows():
                 pdf.cell(90, 7, safe_text(row["Month"]), 1)
                 pdf.cell(100, 7, safe_text(row["Payment Status"]), 1, ln=True)
             pdf.ln(4)
 
-            section("5. Recent Enquiries")
+            section("7. Recent Enquiries")
             if st.session_state.enquiry_df.empty:
                 pdf.multi_cell(0, 6, safe_text("No user-entered enquiries."))
             else:
@@ -1035,9 +1088,9 @@ It does not perform supervisory reporting or regulatory model validation.
                         f"{row['Date']} | {row['Institution']} | {row['Purpose']} | Amount: {rupee(row['Amount'])}"
                     ))
 
-            section("6. Regulatory Note")
+            section("8. Regulatory Note")
             pdf.multi_cell(0, 6, safe_text(
-                "This is a Basel-inspired academic prototype. It includes PD, LGD, EAD, ECL, staging, RWA, CAR, stress testing, VaR and user-entered bureau-style data. It is not a certified regulatory system."
+                "This is a Basel-inspired academic prototype. It includes PD, LGD, EAD, IFRS 9 staging, lifetime ECL, transition matrix, PD term structure, standardised RWA, simplified IRB capital, CAR, stress testing, VaR and user-entered bureau-style data. It is not a certified regulatory system."
             ))
 
             pdf_bytes = pdf.output(dest="S").encode("latin-1", "replace")
