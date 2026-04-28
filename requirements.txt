@@ -1,9 +1,11 @@
 streamlit
 pandas
-numpy==1.26.4
+numpy
 scikit-learn
 lightgbm
-shap==0.44.1
 matplotlib
-fpdf
+shap
 joblib
+fpdf
+qiskit
+qiskit-machine-learning
